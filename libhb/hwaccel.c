@@ -85,6 +85,10 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
     {
         hw_type = av_hwdevice_find_type_by_name("cuda");
     }
+    else if (hw_decode & HB_DECODE_SUPPORT_MF)
+    {
+        hw_type = av_hwdevice_find_type_by_name("d3d11va");
+    }
 
     if (hw_type != AV_HWDEVICE_TYPE_NONE)
     {
