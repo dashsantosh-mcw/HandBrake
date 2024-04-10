@@ -2498,6 +2498,10 @@ static int decavcodecvInfo( hb_work_object_t *w, hb_work_info_t *info )
     {
         info->video_decode_support |= HB_DECODE_SUPPORT_VIDEOTOOLBOX;
     }
+    else
+    {
+        info->video_decode_support |= HB_DECODE_SUPPORT_MF;
+    }
 
     return 1;
 }
