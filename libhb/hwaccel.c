@@ -261,6 +261,8 @@ static int is_encoder_supported(int encoder_id)
         case HB_VCODEC_VT_H264:
         case HB_VCODEC_VT_H265:
         case HB_VCODEC_VT_H265_10BIT:
+        case HB_VCODEC_FFMPEG_MF_H264:
+        case HB_VCODEC_FFMPEG_MF_H265:
             return 1;
         default:
             return 0;
@@ -303,7 +305,7 @@ int hb_hwaccel_decode_is_enabled(hb_job_t *job)
 {
     if (job != NULL)
     {
-        if (job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW)
+        if (job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW || job->hw_decode & HB_DECODE_SUPPORT_MF)
         {
             return hb_hwaccel_is_enabled(job);
         }
