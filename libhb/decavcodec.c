@@ -1754,7 +1754,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
             }
         }
 
-        hb_log("decavcodec: outside hw frame");
+        // hb_log("decavcodec: outside hw frame");
         // recompute the frame/field duration, because sometimes it changes
         compute_frame_duration( pv );
         filter_video(pv);
