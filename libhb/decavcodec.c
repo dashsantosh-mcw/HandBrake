@@ -1662,6 +1662,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 
     if (pv->hw_frame)
     {
+        hb_log("decodeFrame: using hw_frame");
         recv_frame = pv->hw_frame;
     }
 
@@ -1736,6 +1737,8 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 
         if (pv->hw_frame)
         {
+            hb_log("decavcodec: inside hw frame");
+
             if (pv->hw_frame->hw_frames_ctx)
             {
                 hb_log("decavcodec: using hwaccel");
@@ -1761,6 +1764,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
             }
         }
 
+        hb_log("decavcodec: outside hw frame");
         // recompute the frame/field duration, because sometimes it changes
         compute_frame_duration( pv );
         filter_video(pv);
@@ -1872,6 +1876,7 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
 
     if (w->hw_device_ctx)
     {
+        hb_log( "decavcodecvInit: using hw_device_ctx" );
         pv->context->get_format = hw_hwaccel_get_hw_format;
         pv->context->opaque = job;
         av_buffer_replace(&pv->context->hw_device_ctx, w->hw_device_ctx);
