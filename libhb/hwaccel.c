@@ -186,7 +186,7 @@ static int hb_hwaccel_hwframe_init(hb_job_t *job, AVFrame **frame)
 {
     AVBufferRef *hw_frames_ctx = NULL;
     AVBufferRef *hw_device_ctx = job->hw_device_ctx;
-
+    hb_log("hb_hwaccel_hwframe_init: hw_device_ctx %p", hw_device_ctx);
     if (!hw_device_ctx || !frame)
     {
         hb_error("hwaccel: failed to initialize hw frame");
