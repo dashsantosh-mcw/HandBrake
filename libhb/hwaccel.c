@@ -316,6 +316,6 @@ int hb_hwaccel_decode_is_enabled(hb_job_t *job)
     }
     else
     {
-        return 0;
+        return 1;
     }
 }
