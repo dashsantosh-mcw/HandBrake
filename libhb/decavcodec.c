@@ -1738,6 +1738,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
         {
             if (pv->hw_frame->hw_frames_ctx)
             {
+                hb_log("decavcodec: using hwaccel");
                 ret = av_hwframe_transfer_data(pv->frame, pv->hw_frame, 0);
                 av_frame_copy_props(pv->frame, pv->hw_frame);
                 av_frame_unref(pv->hw_frame);
@@ -1749,6 +1750,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
             }
             else
             {
+                hb_log("decavcodec: hwaccel not available");
                 // HWAccel falled back to the software decoder
                 av_frame_ref(pv->frame, pv->hw_frame);
                 av_frame_unref(pv->hw_frame);
@@ -1874,8 +1876,7 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
         pv->context->opaque = job;
         av_buffer_replace(&pv->context->hw_device_ctx, w->hw_device_ctx);
 
-        if (job == NULL ||
-            (job->hw_pix_fmt == AV_PIX_FMT_NONE && job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW))
+        if (job == NULL)
         {
             pv->hw_frame = av_frame_alloc();
         }
