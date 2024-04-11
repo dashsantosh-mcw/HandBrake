@@ -92,7 +92,7 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
 
     if (hw_type != AV_HWDEVICE_TYPE_NONE)
     {
-+       hb_log("Init hw accel: %d", hw_type);
+        hb_log("Init hw accel: %d", hw_type);
         for (int i = 0;; i++)
         {
             const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
@@ -109,8 +109,8 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
         }
     }
 
-    if (pix_fmt != AV_PIX_FMT_NONE)
-    {
+    // if (pix_fmt != AV_PIX_FMT_NONE)
+    // {
         AVBufferRef *ctx;
         if ((err = av_hwdevice_ctx_create(&ctx, hw_type, NULL, NULL, 0)) < 0)
         {
@@ -120,7 +120,7 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
         {
             *hw_device_ctx = ctx;
         }
-    }
+    // }
 
     return err;
 }
