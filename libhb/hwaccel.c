@@ -92,6 +92,7 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
 
     if (hw_type != AV_HWDEVICE_TYPE_NONE)
     {
++       hb_log("Init hw accel: %d", hw_type);
         for (int i = 0;; i++)
         {
             const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
