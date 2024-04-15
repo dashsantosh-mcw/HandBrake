@@ -2109,11 +2109,14 @@ static int decodePacket( hb_work_object_t * w )
 
         if (w->hw_device_ctx)
         {
+            hb_log("decodePacket: using hw context");
             int ret = av_buffer_replace(&pv->context->hw_device_ctx, w->hw_device_ctx);
             if (ret < 0)
             {
                 return HB_WORK_ERROR;
             }
+        } else {
+            hb_log("decodePacket: using sw context");
         }
 
 #if HB_PROJECT_FEATURE_QSV
@@ -2488,7 +2491,7 @@ static int decavcodecvInfo( hb_work_object_t *w, hb_work_info_t *info )
     {
         info->video_decode_support |= HB_DECODE_SUPPORT_VIDEOTOOLBOX;
     }
-    else
+    else if (pv->context->pix_fmt == AV_PIX_FMT_D3D11)
     {
         info->video_decode_support |= HB_DECODE_SUPPORT_MF;
     }

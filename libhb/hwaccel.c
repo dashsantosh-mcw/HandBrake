@@ -93,16 +93,19 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
     if (hw_type != AV_HWDEVICE_TYPE_NONE)
     {
         hb_log("Init hw accel: %d", hw_type);
+        hb_log("Init hw accel for codec: %d", codec);
         for (int i = 0;; i++)
         {
             const AVCodecHWConfig *config = avcodec_get_hw_config(codec, i);
             if (!config)
             {
+                hb_log("hb_hwaccel_hw_ctx_init: dec not supported");
                 break;
             }
             if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
                 config->device_type == hw_type)
             {
+                hb_log("pix_fmt: %d %d", AV_PIX_FMT_D3D11, config->pix_fmt);
                 pix_fmt = config->pix_fmt;
                 break;
             }
@@ -215,8 +218,9 @@ hb_buffer_t * hb_hwaccel_copy_video_buffer_to_hw_video_buffer(hb_job_t *job, hb_
         int ret;
 
         hb_video_buffer_to_avframe(&frame, buf_in);
-
+        hb_log("hb_hwaccel_copy_video_buffer_to_hw_video_buffer: hw_device_ctx %p", job->hw_device_ctx);
         ret = hb_hwaccel_hwframe_init(job, &hw_frame);
+        hb_log("hb_accel_hwframe_init: status %d", ret);
         if (ret < 0)
         {
             goto fail;

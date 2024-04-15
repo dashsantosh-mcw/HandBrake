@@ -850,10 +850,15 @@ static int DecodePreviews( hb_scan_t * data, hb_title_t * title, int flush )
     {
         hw_decode = HB_DECODE_SUPPORT_MF;
     }
+    hw_decode = HB_DECODE_SUPPORT_MF;
+
+
+    hb_log("scan: hwaccel using %d", hw_decode);
 
     void *hw_device_ctx = NULL;
     if (hw_decode)
     {
+        hb_log("scan: init hw ctx");
         hb_hwaccel_hw_ctx_init(title->video_codec_param, hw_decode, &hw_device_ctx);
     }
 
