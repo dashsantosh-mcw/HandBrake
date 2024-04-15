@@ -35,7 +35,6 @@ FFMPEG.CONFIGURE.extra = \
     --disable-muxers \
     --disable-network \
     --disable-filters \
-    --disable-hwaccels \
     --disable-vdpau \
     --disable-encoders \
     --enable-libmp3lame \
@@ -190,6 +189,7 @@ endif
 
 ifeq (1,$(FEATURE.mf))
 FFMPEG.CONFIGURE.extra += \
+      --enable-hwaccels \
       --enable-encoder=h264_mf \
       --enable-encoder=hevc_mf
 endif
