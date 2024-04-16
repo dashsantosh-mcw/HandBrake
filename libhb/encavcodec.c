@@ -557,6 +557,7 @@ int encavcodecInit( hb_work_object_t * w, hb_job_t * job )
     {
         hb_log("encavcodec: using full hardware acceleration pipeline");
         context->hw_device_ctx = av_buffer_ref(pv->job->hw_device_ctx);
+        hb_log("job pix_fmt: %d", job->hw_pix_fmt);
         hb_hwaccel_hwframes_ctx_init(context, job);
         context->pix_fmt = job->hw_pix_fmt;
     }
