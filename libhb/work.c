@@ -1704,6 +1704,8 @@ static void do_job(hb_job_t *job)
         job->hw_pix_fmt = hb_get_best_hw_pix_fmt(job);
         job->input_pix_fmt = hb_get_best_pix_fmt(job);
 
+        hb_log("work.c: pix fmt hw - %d | inp - %d", job->hw_pix_fmt, job->input_pix_fmt);
+
         // Init hwaccel context if needed
         if (hb_hwaccel_decode_is_enabled(job))
         {

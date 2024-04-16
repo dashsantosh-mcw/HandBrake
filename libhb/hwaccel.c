@@ -112,8 +112,11 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
         }
     }
 
-    // if (pix_fmt != AV_PIX_FMT_NONE)
-    // {
+    hb_log("Outside pix_fmt check: %d", pix_fmt);
+
+    if (pix_fmt != AV_PIX_FMT_NONE)
+    {
+        hb_log("Inside pix_fmt check: %d", pix_fmt);
         AVBufferRef *ctx;
         if ((err = av_hwdevice_ctx_create(&ctx, hw_type, NULL, NULL, 0)) < 0)
         {
@@ -122,8 +125,9 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
         else
         {
             *hw_device_ctx = ctx;
+            hb_log("hwaccel: hwdevice successfully created");
         }
-    // }
+    }
 
     return err;
 }
