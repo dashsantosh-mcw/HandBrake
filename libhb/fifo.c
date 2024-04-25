@@ -628,6 +628,8 @@ static int copy_hwframe_to_video_buffer(const AVFrame *frame, hb_buffer_t *buf)
 {
     int ret;
     AVFrame *hw_frame = av_frame_alloc();
+    hb_log("fifo: copy_hwframe_to_video_buffer");
+    hb_log("fifo: frame pix_fmt: %d", frame->format);
 
     ret = av_frame_copy_props(hw_frame, frame);
     if (ret < 0)
