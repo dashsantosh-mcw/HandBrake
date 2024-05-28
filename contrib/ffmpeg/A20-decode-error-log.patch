@@ -1,0 +1,39 @@
+From 1c549a6d59a468fc98682fd3ee1b1728199ef51f Mon Sep 17 00:00:00 2001
+From: Dash Santosh <santdas36@gmail.com>
+Date: Mon, 29 Apr 2024 16:59:41 +0530
+Subject: [PATCH] add log
+
+---
+ libavcodec/decode.c | 2 +-
+ libavcodec/encode.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index 2cfb3fcf97..306a1d6cbf 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -1688,7 +1688,7 @@ end:
+ 
+ fail:
+     if (ret < 0) {
+-        av_log(avctx, AV_LOG_ERROR, "get_buffer() failed\n");
++        av_log(avctx, AV_LOG_ERROR, "decode: get_buffer() failed\n");
+         av_frame_unref(frame);
+     }
+ 
+diff --git a/libavcodec/encode.c b/libavcodec/encode.c
+index a436be2657..08124013b7 100644
+--- a/libavcodec/encode.c
++++ b/libavcodec/encode.c
+@@ -831,7 +831,7 @@ int ff_encode_alloc_frame(AVCodecContext *avctx, AVFrame *frame)
+ 
+     ret = avcodec_default_get_buffer2(avctx, frame, 0);
+     if (ret < 0) {
+-        av_log(avctx, AV_LOG_ERROR, "get_buffer() failed\n");
++        av_log(avctx, AV_LOG_ERROR, "encode: get_buffer() failed\n");
+         av_frame_unref(frame);
+         return ret;
+     }
+-- 
+2.43.0.windows.1
+
