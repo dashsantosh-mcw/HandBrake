@@ -597,6 +597,8 @@ static void closePrivData( hb_work_private_t ** ppv )
         }
         if ( pv->context )
         {
+            if (pv->context->hw_device_ctx)
+                av_buffer_unref(&pv->context->hw_device_ctx);
             hb_avcodec_free_context(&pv->context);
         }
         av_packet_free(&pv->pkt);
@@ -1858,18 +1860,57 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
     pv->context->err_recognition = AV_EF_CRCCHECK;
     pv->context->error_concealment = FF_EC_GUESS_MVS|FF_EC_DEBLOCK;
 
-    if (w->hw_device_ctx)
+    if ( job && job->mf_decode )
     {
-        pv->context->get_format = hw_hwaccel_get_hw_format;
-        pv->context->opaque = job;
-        av_buffer_replace(&pv->context->hw_device_ctx, w->hw_device_ctx);
-
-        if (job == NULL ||
-            (job->hw_pix_fmt == AV_PIX_FMT_NONE && job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW))
+        enum AVHWDeviceType hw_type = av_hwdevice_find_type_by_name("d3d11va");
+        pv->hw_pix_fmt = AV_PIX_FMT_NONE;
+        if (hw_type != AV_HWDEVICE_TYPE_NONE) {
+            int i;
+            for (i = 0;; i++)
+            {
+                const AVCodecHWConfig *config = avcodec_get_hw_config(pv->codec, i);
+                if (!config)
+                    break;
+                if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+                    config->device_type == hw_type)
+                {
+                    pv->hw_pix_fmt = config->pix_fmt;
+                    break;
+                }
+            }
+        }
+        if (pv->hw_pix_fmt != AV_PIX_FMT_NONE)
         {
-            pv->hw_frame = av_frame_alloc();
+            AVBufferRef *hw_device_ctx;
+            int err;
+            if ((err = av_hwdevice_ctx_create(&hw_device_ctx, hw_type, NULL, NULL, 0)) < 0) {
+                hb_error( "decavcodecvInit: failed to create hwdevice" );
+            } else {
+                pv->context->get_format = hw_hwaccel_get_hw_format;
+                pv->context->opaque = pv;
+                pv->context->hw_device_ctx = hw_device_ctx;
+                pv->hw_frame = av_frame_alloc();
+                if (pv->hw_frame == NULL)
+                {
+                    hb_log("decavcodecvInit: av_frame_alloc failed");
+                    return 1;
+                }
+            }
         }
     }
+
+    // if (w->hw_device_ctx)
+    // {
+    //     pv->context->get_format = hw_hwaccel_get_hw_format;
+    //     pv->context->opaque = job;
+    //     av_buffer_replace(&pv->context->hw_device_ctx, w->hw_device_ctx);
+
+    //     if (job == NULL ||
+    //         (job->hw_pix_fmt == AV_PIX_FMT_NONE && job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW))
+    //     {
+    //         pv->hw_frame = av_frame_alloc();
+    //     }
+    // }
 
     if ( pv->title->opaque_priv )
     {
@@ -2479,6 +2520,24 @@ static int decavcodecvInfo( hb_work_object_t *w, hb_work_info_t *info )
     info->chroma_location = pv->context->chroma_sample_location;
 
     info->video_decode_support = HB_DECODE_SUPPORT_SW;
+
+    hw_type = av_hwdevice_find_type_by_name("d3d11va");
+    if (hw_type != AV_HWDEVICE_TYPE_NONE)
+    {
+        int i;
+        for (i = 0;; i++)
+        {
+            const AVCodecHWConfig *config = avcodec_get_hw_config(pv->context->codec, i);
+            if (!config)
+                break;
+            if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+                config->device_type == hw_type)
+            {
+                info->video_decode_support |= HB_DECODE_SUPPORT_MF;
+                break;
+            }
+        }
+    }
 
 #if HB_PROJECT_FEATURE_QSV
     if (hb_qsv_available())

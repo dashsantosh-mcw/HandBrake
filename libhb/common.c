@@ -4291,6 +4291,8 @@ static void job_setup(hb_job_t * job, hb_title_t * title)
     job->qsv.decode                = !!(title->video_decode_support &
                                         HB_DECODE_SUPPORT_QSV);
 #endif
+    job->mf_decode            = !!(title->video_decode_support &
+                                        HB_DECODE_SUPPORT_MF);
 }
 
 int hb_output_color_prim(hb_job_t * job)
