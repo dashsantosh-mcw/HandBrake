@@ -764,6 +764,8 @@ struct hb_job_s
         } enc_info;
     } qsv;
 
+    int hwaccel_decode;
+
 #ifdef __LIBHB__
     /* Internal data */
     hb_handle_t   * h;
@@ -1146,6 +1148,7 @@ struct hb_title_s
     int           video_decode_support;
 #define HB_DECODE_SUPPORT_SW    0x01 // software (libavcodec or mpeg2dec)
 #define HB_DECODE_SUPPORT_QSV   0x02 // Intel Quick Sync Video
+#define HB_DECODE_SUPPORT_HWACCEL 0x04 // HWAccel
 
     hb_metadata_t * metadata;
 
