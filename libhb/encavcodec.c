@@ -743,9 +743,9 @@ int encavcodecInit( hb_work_object_t * w, hb_job_t * job )
 
         pv->sws_context_to_nv12 = hb_sws_get_context(
                                     job->width, job->height,
-                                    AV_PIX_FMT_YUV420P,
+                                    AV_PIX_FMT_YUV420P, AVCOL_RANGE_MPEG,
                                     job->width, job->height,
-                                    AV_PIX_FMT_NV12,
+                                    AV_PIX_FMT_NV12, AVCOL_RANGE_MPEG,
                                     SWS_LANCZOS|SWS_ACCURATE_RND,
                                     SWS_CS_DEFAULT);
 

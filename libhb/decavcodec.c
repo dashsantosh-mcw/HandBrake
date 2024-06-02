@@ -2470,6 +2470,7 @@ static void compute_frame_duration( hb_work_private_t *pv )
 static int decavcodecvInfo( hb_work_object_t *w, hb_work_info_t *info )
 {
     hb_work_private_t *pv = w->private_data;
+    enum AVHWDeviceType hw_type;
 
     int clock_min, clock_max, clock;
     hb_video_framerate_get_limits(&clock_min, &clock_max, &clock);
