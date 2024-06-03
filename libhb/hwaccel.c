@@ -105,7 +105,7 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
             if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
                 config->device_type == hw_type)
             {
-                hb_log("pix_fmt: %d %d", AV_PIX_FMT_NV12, config->pix_fmt);
+                hb_log("pix_fmt: %d %d", AV_PIX_FMT_D3D11, config->pix_fmt);
                 pix_fmt = config->pix_fmt;
                 break;
             }
