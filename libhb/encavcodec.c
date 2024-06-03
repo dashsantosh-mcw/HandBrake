@@ -52,6 +52,9 @@ struct hb_work_private_s
     } frame_info[FRAME_INFO_SIZE];
 
     hb_chapter_queue_t * chapter_queue;
+
+    struct SwsContext  * sws_context_to_nv12;
+    hb_buffer_t        * nv12_buf;
 };
 
 int  encavcodecInit( hb_work_object_t *, hb_job_t * );
@@ -756,6 +759,18 @@ int encavcodecInit( hb_work_object_t * w, hb_job_t * job )
             context->max_b_frames = 1;
         }
         av_dict_set(&av_opts, "hw_encoding", "1", 0);
+        pv->sws_context_to_nv12 = hb_sws_get_context(
+                                    job->width, job->height,
+                                    AV_PIX_FMT_YUV420P, AVCOL_RANGE_MPEG,
+                                    job->width, job->height,
+                                    AV_PIX_FMT_NV12, AVCOL_RANGE_MPEG,
+                                    SWS_LANCZOS|SWS_ACCURATE_RND,
+                                    SWS_CS_DEFAULT);
+
+        pv->nv12_buf = hb_frame_buffer_init(
+                         AV_PIX_FMT_NV12, job->width, job->height);
+
+        context->pix_fmt = AV_PIX_FMT_NV12;
     }
 
     if( job->pass_id == HB_PASS_ENCODE_ANALYSIS ||
@@ -893,6 +908,14 @@ void encavcodecClose( hb_work_object_t * w )
             avcodec_flush_buffers( pv->context );
         }
         hb_avcodec_free_context(&pv->context);
+    }
+    if (pv->sws_context_to_nv12 != NULL)
+    {
+        sws_freeContext(pv->sws_context_to_nv12);
+    }
+    if (pv->nv12_buf != NULL)
+    {
+        hb_buffer_close(&pv->nv12_buf);
     }
     if( pv->file )
     {
@@ -1076,6 +1099,25 @@ static void Encode( hb_work_object_t *w, hb_buffer_t **buf_in,
     // Convert the hb_buffer_t to avframe
     // This will consume the hb_buffer_t and make it NULL
     hb_video_buffer_to_avframe(&frame, buf_in);
+
+    if (pv->sws_context_to_nv12)
+    {
+        uint8_t *srcs[]   = { in->plane[0].data, in->plane[1].data, in->plane[2].data };
+        int srcs_stride[] = { in->plane[0].stride, in->plane[1].stride, in->plane[2].stride };
+        uint8_t *dsts[]   = { pv->nv12_buf->plane[0].data, pv->nv12_buf->plane[1].data, NULL };
+        int dsts_stride[] = { pv->nv12_buf->plane[0].stride, pv->nv12_buf->plane[1].stride, 0 };
+
+        sws_scale(pv->sws_context_to_nv12,
+                  (const uint8_t* const*)srcs, srcs_stride,
+                  0, in->f.height, dsts, dsts_stride);
+
+        for (int i = 0; i < 3; i++)
+        {
+            frame.data[i] = dsts[i];
+            frame.linesize[i] = dsts_stride[i];
+        }
+    }
+
     frame.pts = pv->frameno_in++;
     frame.duration = 0;
 
