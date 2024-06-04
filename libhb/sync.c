@@ -396,7 +396,7 @@ static hb_buffer_t * CreateBlackBuf( sync_stream_t * stream,
             }
             else
 #endif
-            if (false /* hb_hwaccel_is_full_hardware_pipeline_enabled(stream->common->job) */)
+            if (0 /*hb_hwaccel_is_full_hardware_pipeline_enabled(stream->common->job)*/)
             {
                 hb_log("sync: full pipeline enabled");
                 buf = hb_hwaccel_copy_video_buffer_to_hw_video_buffer(stream->common->job, &buf);
