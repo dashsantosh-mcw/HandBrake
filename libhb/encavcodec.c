@@ -1097,12 +1097,11 @@ static void Encode( hb_work_object_t *w, hb_buffer_t **buf_in,
     {
         uint8_t *srcs[]   = { in->plane[0].data, in->plane[1].data, in->plane[2].data };
         int srcs_stride[] = { in->plane[0].stride, in->plane[1].stride, in->plane[2].stride };
+        hb_error("encavcodec: converting to NV12");
+        hb_error("stride: %d %d %d", in->plane[0].stride, in->plane[1].stride, in->plane[2].stride);
         uint8_t *dsts[]   = { pv->nv12_buf->plane[0].data, pv->nv12_buf->plane[1].data, NULL };
         int dsts_stride[] = { pv->nv12_buf->plane[0].stride, pv->nv12_buf->plane[1].stride, 0 };
 
-        hb_log("encavcodec: converting to NV12");
-        hb_log("stride: %d %d %d", in->plane[0].stride, in->plane[1].stride, in->plane[2].stride);
-        
         sws_scale(pv->sws_context_to_nv12,
                   (const uint8_t* const*)srcs, srcs_stride,
                   0, in->f.height, dsts, dsts_stride);
