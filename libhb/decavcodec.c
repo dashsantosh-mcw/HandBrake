@@ -1718,7 +1718,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     av_packet_unref(avp);
     if (ret < 0 && ret != AVERROR_EOF)
     {
-        hb_error("decavcodec: error sending video packet to decoder");
+        hb_error("decavcodec: error sending video packet to decoder: %d", ret);
         ++pv->decode_errors;
         return 0;
     }
