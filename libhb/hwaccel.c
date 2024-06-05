@@ -175,7 +175,7 @@ AVBufferRef *hb_hwaccel_init_hw_frames_ctx(AVBufferRef *hw_device_ctx,
 {
     AVBufferRef *hw_frames_ctx = av_hwframe_ctx_alloc(hw_device_ctx);
     AVHWFramesContext *frames_ctx = (AVHWFramesContext*)hw_frames_ctx->data;
-    frames_ctx->format = hw_fmt;
+    frames_ctx->format = AV_PIX_FMT_NV12;
     frames_ctx->sw_format = sw_fmt;
     frames_ctx->initial_pool_size = 64;
     hb_log("hwaccel: initial_pool_size %d, hw_fmt %d, sw_fmt %d", frames_ctx->initial_pool_size, hw_fmt, sw_fmt);
