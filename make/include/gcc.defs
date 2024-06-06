@@ -103,6 +103,9 @@ GCC.args.extra.hpp_o   =
 GCC.args.extra.cpp_o   =
 GCC.args.extra.dylib++ = $(LDFLAGS)
 GCC.args.extra.exe++   = $(LDFLAGS)
+GCC.args.extra.exe++   = -Wl-debug
+GCC.args.extra.exe++   = -Wl,--pdb=
+
 # If hardening is enabled -D_FORTIFY_SOURCE=2 adds compile-time protection and run-time
 # checking against static sized buffer overflow flaws. -fstack-protector-strong enables
 # stack canaries to detect stack buffer overflows (stack overwrites).
