@@ -21,7 +21,7 @@ ifeq ($(GCC.O),$(filter $(GCC.O),size size-aggressive))
     SVT-AV1.CONFIGURE.extra += -DCMAKE_BUILD_TYPE=MinSizeRel -DMINIMAL_BUILD=ON
 else
     ifneq (none,$(SVT-AV1.GCC.g))
-        SVT-AV1.CONFIGURE.extra += -DCMAKE_BUILD_TYPE=Release
+        SVT-AV1.CONFIGURE.extra += -DCMAKE_BUILD_TYPE=Debug
     else
         SVT-AV1.CONFIGURE.extra += -DCMAKE_BUILD_TYPE=Release
     endif

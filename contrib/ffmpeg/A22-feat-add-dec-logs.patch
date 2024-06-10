@@ -1,0 +1,72 @@
+From f9cc4121b6c9b0ee95632f2b33d482c718a4fc27 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <santdas36@gmail.com>
+Date: Tue, 4 Jun 2024 19:53:03 +0530
+Subject: [PATCH] feat: add dec logs
+
+---
+ libavcodec/decode.c | 14 +++++++++++++-
+ 1 file changed, 13 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index 306a1d6cbf..139cb6ecfa 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -485,7 +485,12 @@ FF_ENABLE_DEPRECATION_WARNINGS
+             avci->draining_done = 1;
+         }
+     }
+-
++    if (avctx->codec->type == AVMEDIA_TYPE_VIDEO) {
++        av_log(avctx, AV_LOG_ERROR, "consumed %d, ret %d\n", consumed, ret);
++        av_log(avctx, AV_LOG_ERROR, "frame %p, got_frame %d, ret %d\n", frame, got_frame, ret);
++        av_log(avctx, AV_LOG_ERROR, "pkt %p, pkt->data %p, pkt->size %d\n", pkt, pkt->data, pkt->size);
++        av_log(avctx, AV_LOG_ERROR, "consumed >= pkt->size || ret < 0: %d|| %d = %d\n", consumed >= pkt->size, ret < 0, consumed >= pkt->size || ret < 0);
++    }
+     if (consumed >= pkt->size || ret < 0) {
+         av_packet_unref(pkt);
+     } else {
+@@ -607,6 +612,8 @@ static int decode_simple_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+         if (discarded_samples > avctx->max_samples)
+             return AVERROR(EAGAIN);
+         ret = decode_simple_internal(avctx, frame, &discarded_samples);
++        av_log(avctx, AV_LOG_DEBUG, "discarded_samples: %d\n", discarded_samples);
++        av_log(avctx, AV_LOG_ERROR, "decode_simple_receive_frame cpm%d: dpm:%d ret:%d\n", frame->coded_picture_number, frame->display_picture_number, ret);
+         if (ret < 0)
+             return ret;
+     }
+@@ -658,6 +665,7 @@ static int decode_receive_frame_internal(AVCodecContext *avctx, AVFrame *frame)
+         ret = fill_frame_props(avctx, frame);
+         if (ret < 0) {
+             av_frame_unref(frame);
++            av_log(avctx, AV_LOG_ERROR, "fill_frame_props() failed: %d\n", ret);
+             return ret;
+         }
+ 
+@@ -694,6 +702,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
+                 ret = fdd->post_process(avctx, frame);
+                 if (ret < 0) {
+                     av_frame_unref(frame);
++                    av_log(avctx, AV_LOG_ERROR, "post_process() failed: %d\n", ret);
+                     return ret;
+                 }
+             }
+@@ -703,6 +712,7 @@ FF_ENABLE_DEPRECATION_WARNINGS
+     /* free the per-frame decode data */
+     av_buffer_unref(&frame->private_ref);
+ 
++    av_log(avctx, AV_LOG_DEBUG, "decode_receive_frame ret:%d\n", ret);
+     return ret;
+ }
+ 
+@@ -732,6 +742,8 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
+ 
+     if (!avci->buffer_frame->buf[0] && !dc->draining_started) {
+         ret = decode_receive_frame_internal(avctx, avci->buffer_frame);
++        av_log(avctx, AV_LOG_DEBUG, "avcodec_send_packet ret:%d\n", ret);
++        av_log(avctx, AV_LOG_DEBUG, "avc condition: %d\n", ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF);
+         if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+             return ret;
+     }
+-- 
+2.43.0.windows.1
+

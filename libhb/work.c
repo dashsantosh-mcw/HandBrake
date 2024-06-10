@@ -2211,12 +2211,19 @@ void hb_work_loop( void * _w )
     while ((w->die == NULL || !*w->die) && !*w->done &&
            w->status != HB_WORK_DONE)
     {
+        hb_log("Entering loop: w->die: %p, w->done: %p, *w->done: %d, w->status: %d\n", 
+             w->die, w->done, *w->done, w->status);  //Majid
         // fifo_in == NULL means this is a data source (e.g. reader)
         if (w->fifo_in != NULL)
         {
+             hb_log("w->fifo_in is not NULL, attempting to get buffer from FIFO queue.\n"); //Majid
             buf_in = hb_fifo_get_wait( w->fifo_in );
             if ( buf_in == NULL )
+            {
+                 hb_error("Continuing loop because buf_in is NULL.\n");
+                 usleep(1000);   //Majid
                 continue;
+            }
             if ( *w->done )
             {
                 if( buf_in )
@@ -2251,6 +2258,7 @@ void hb_work_loop( void * _w )
                     buf_out = NULL;
                     break;
                 }
+                usleep(1000); //Majid
             }
         }
         else if (w->fifo_in == NULL)
