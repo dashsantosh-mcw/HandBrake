@@ -1643,6 +1643,16 @@ static void filter_video(hb_work_private_t *pv)
  * The output of this function is stored in 'pv->list', which contains a list
  * of zero or more decoded packets.
  */
+void printAVCodecContext(AVCodecContext *ctx)
+{
+    hb_error("AVCodecContext data:\n");
+    hb_error("  codec_type: %d\n", ctx->codec_type);
+    hb_error("  codec_id: %d\n", ctx->codec_id);
+    hb_error("  width: %d\n", ctx->width);
+    hb_error("  height: %d\n", ctx->height);
+     hb_error("  pix_fmt: %d\n", ctx->pix_fmt);
+    // Print other fields as needed
+}
 static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 {
     int got_picture = 0, oldlevel = 0, ret;
@@ -1704,7 +1714,18 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
         hb_buffer_close(&pv->palette);
     }
 
+    hb_log("Sending packet for frame %d\n", recv_frame->coded_picture_number);
+
+    //printAVCodecContext(pv->context);
+
     ret = avcodec_send_packet(pv->context, avp);
+
+    if (ret < 0) {
+    hb_error("avcodec_send_packet failed: %d\n", ret);
+    return 0;
+    }
+    //printAVCodecContext(pv->context);
+
     av_packet_unref(avp);
     if (ret < 0 && ret != AVERROR_EOF)
     {
@@ -1715,7 +1736,9 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 
     do
     {
+        hb_log("Waiting for frame %d\n", recv_frame->coded_picture_number);
         ret = avcodec_receive_frame(pv->context, recv_frame);
+        hb_log("After avcodec_receive_frame: ret2 = %d\n", ret);
         if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
         {
             hb_error("decavcodec: error receiving video frame from decoder");
@@ -1726,6 +1749,8 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
             break;
         }
         got_picture = 1;
+            hb_log("Processing frame %d\n", recv_frame->coded_picture_number);
+            hb_log("Processing pts %d\n", recv_frame->pts);
 
         if (pv->hw_frame)
         {
@@ -1734,6 +1759,8 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
             if (pv->hw_frame->hw_frames_ctx)
             {
                 hb_log("decavcodec: using hwaccel");
+                hb_log("Transferring frame %d to HW memory\n", recv_frame->coded_picture_number);
+
                 ret = av_hwframe_transfer_data(pv->frame, pv->hw_frame, 0);
                 av_frame_copy_props(pv->frame, pv->hw_frame);
                 av_frame_unref(pv->hw_frame);
@@ -1761,7 +1788,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
         compute_frame_duration( pv );
         filter_video(pv);
     } while (ret >= 0);
-
+    hb_log("Processing frame got_picture %d\n", got_picture);
     if ( global_verbosity_level <= 1 )
     {
         av_log_set_level( oldlevel );
