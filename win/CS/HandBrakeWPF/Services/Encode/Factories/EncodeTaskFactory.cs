@@ -107,7 +107,7 @@ namespace HandBrakeWPF.Services.Encode.Factories
             {
                 hwDecode = (int)NativeConstants.HB_DECODE_SUPPORT_NVDEC;
             }
-            else if (directx)
+            if (directx)
             {
                 hwDecode = (int)NativeConstants.HB_DECODE_SUPPORT_MF;
             }
@@ -296,6 +296,12 @@ namespace HandBrakeWPF.Services.Encode.Factories
             {
                 video.HardwareDecode = (int)NativeConstants.HB_DECODE_SUPPORT_NVDEC;
             }
+
+            if (this.userSettingService.GetUserSetting<bool>(UserSettingConstants.EnableDirectXDecoding))
+            {
+                video.HardwareDecode = (int)NativeConstants.HB_DECODE_SUPPORT_MF;
+            }
+
 
             video.Options = job.ExtraAdvancedArguments;
 
