@@ -158,6 +158,8 @@ struct hb_work_private_s
     AVFrame              * hw_frame;
     enum AVPixelFormat     hw_pix_fmt;
 
+    
+
     hb_list_t            * list_subtitle;
 };
 
@@ -597,6 +599,9 @@ static void closePrivData( hb_work_private_t ** ppv )
         }
         if ( pv->context )
         {
+                        if (pv->context->hw_device_ctx)
+                av_buffer_unref(&pv->context->hw_device_ctx);
+
             hb_avcodec_free_context(&pv->context);
         }
         av_packet_free(&pv->pkt);
@@ -1650,9 +1655,18 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     reordered_data_t * reordered;
     AVFrame *recv_frame = pv->frame;
 
+    FILE *fptr = fopen("C:/Users/mcwsv/OneDrive/Desktop/HandBrake-exe/sampletxt.txt", "a"); 
+    if (fptr == NULL) 
+    { 
+        printf("Could not open file"); 
+        fclose(fptr);
+        return 0; 
+    } 
+
     if (pv->hw_frame)
     {
         recv_frame = pv->hw_frame;
+        fprintf(fptr, "inside of hw_frame in decode_frame : %d\n", pv->hw_frame);
     }
 
     if ( global_verbosity_level <= 1 )
@@ -1702,6 +1716,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
         memcpy(palette, pv->palette->data, size);
         hb_buffer_close(&pv->palette);
     }
+    
 
     ret = avcodec_send_packet(pv->context, avp);
     av_packet_unref(avp);
@@ -1714,6 +1729,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     do
     {
         ret = avcodec_receive_frame(pv->context, recv_frame);
+        fprintf(fptr, "After avcodec_receive_frame: ret2 = %d, pv->hw_frame : %d\n", ret , pv->hw_frame);
         if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
         {
             ++pv->decode_errors;
@@ -1726,28 +1742,19 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 
         if (pv->hw_frame)
         {
-            if (pv->hw_frame->hw_frames_ctx)
+            ret = av_hwframe_transfer_data(pv->frame, pv->hw_frame, 0);
+            pv->frame->pts = pv->hw_frame->pts;
+            av_frame_unref(pv->hw_frame);
+
+            if (ret < 0)
             {
-                ret = av_hwframe_transfer_data(pv->frame, pv->hw_frame, 0);
-                av_frame_copy_props(pv->frame, pv->hw_frame);
-                av_frame_unref(pv->hw_frame);
-                if (ret < 0)
-                {
-                    hb_error("decavcodec: error transferring data to system memory");
-                    break;
-                }
+                hb_error("Error transferring data to system memory\n");
+                break;
             }
-            else
-            {
-                // HWAccel falled back to the software decoder
-                av_frame_ref(pv->frame, pv->hw_frame);
-                av_frame_unref(pv->hw_frame);
-                if (ret < 0)
-                {
-                    hb_error("decavcodec: error hwaccel copying frame");
-                }
-            }
+            // In this case, the frame might be NV12 instead of YUV420P,
+            // but the filter chain seems to handle that transparently.
         }
+
 
         // recompute the frame/field duration, because sometimes it changes
         compute_frame_duration( pv );
@@ -1758,8 +1765,23 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     {
         av_log_set_level( oldlevel );
     }
-
+    fclose(fptr);
     return got_picture;
+}
+
+static enum AVPixelFormat get_hw_format(AVCodecContext *s, const enum AVPixelFormat *pix_fmts)
+{
+    hb_work_private_t *pv = s->opaque;
+    const enum AVPixelFormat *p;
+
+    for (p = pix_fmts; *p != -1; p++)
+    {
+        if (*p == pv->hw_pix_fmt)
+            return *p;
+    }
+
+    hb_error( "Failed to get HW surface format\n" );
+    return AV_PIX_FMT_NONE;
 }
 
 
@@ -1858,18 +1880,45 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
     pv->context->err_recognition = AV_EF_CRCCHECK;
     pv->context->error_concealment = FF_EC_GUESS_MVS|FF_EC_DEBLOCK;
 
-    if (w->hw_device_ctx)
+        if ( job && job->hwaccel_decode )
     {
-        pv->context->get_format = hw_hwaccel_get_hw_format;
-        pv->context->opaque = job;
-        av_buffer_replace(&pv->context->hw_device_ctx, w->hw_device_ctx);
-
-        if (job == NULL ||
-            (job->hw_pix_fmt == AV_PIX_FMT_NONE && job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW))
+        enum AVHWDeviceType hw_type = av_hwdevice_find_type_by_name("d3d11va");
+        pv->hw_pix_fmt = AV_PIX_FMT_NONE;
+        if (hw_type != AV_HWDEVICE_TYPE_NONE) {
+            int i;
+            for (i = 0;; i++)
+            {
+                const AVCodecHWConfig *config = avcodec_get_hw_config(pv->codec, i);
+                if (!config)
+                    break;
+                if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+                    config->device_type == hw_type)
+                {
+                    pv->hw_pix_fmt = config->pix_fmt;
+                    break;
+                }
+            }
+        }
+        if (pv->hw_pix_fmt != AV_PIX_FMT_NONE)
         {
-            pv->hw_frame = av_frame_alloc();
+            AVBufferRef *hw_device_ctx;
+            int err;
+            if ((err = av_hwdevice_ctx_create(&hw_device_ctx, hw_type, NULL, NULL, 0)) < 0) {
+                hb_error( "decavcodecvInit: failed to create hwdevice" );
+            } else {
+                pv->context->get_format = get_hw_format;
+                pv->context->opaque = pv;
+                pv->context->hw_device_ctx = hw_device_ctx;
+                pv->hw_frame = av_frame_alloc();
+                if (pv->hw_frame == NULL)
+                {
+                    hb_log("decavcodecvInit: av_frame_alloc failed");
+                    return 1;
+                }
+            }
         }
     }
+
 
     if ( pv->title->opaque_priv )
     {
@@ -2429,6 +2478,8 @@ static void compute_frame_duration( hb_work_private_t *pv )
 static int decavcodecvInfo( hb_work_object_t *w, hb_work_info_t *info )
 {
     hb_work_private_t *pv = w->private_data;
+    enum AVHWDeviceType hw_type;
+
 
     int clock_min, clock_max, clock;
     hb_video_framerate_get_limits(&clock_min, &clock_max, &clock);
@@ -2479,6 +2530,25 @@ static int decavcodecvInfo( hb_work_object_t *w, hb_work_info_t *info )
     info->chroma_location = pv->context->chroma_sample_location;
 
     info->video_decode_support = HB_DECODE_SUPPORT_SW;
+
+    hw_type = av_hwdevice_find_type_by_name("d3d11va");
+    if (hw_type != AV_HWDEVICE_TYPE_NONE)
+    {
+        int i;
+        for (i = 0;; i++)
+        {
+            const AVCodecHWConfig *config = avcodec_get_hw_config(pv->context->codec, i);
+            if (!config)
+                break;
+            if (config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX &&
+                config->device_type == hw_type)
+            {
+                info->video_decode_support |= HB_DECODE_SUPPORT_HWACCEL;
+                break;
+            }
+        }
+    }
+
 
 #if HB_PROJECT_FEATURE_QSV
     if (hb_qsv_available())

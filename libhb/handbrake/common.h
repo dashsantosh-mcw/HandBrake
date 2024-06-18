@@ -825,6 +825,8 @@ struct hb_job_s
     } qsv;
 
     int hw_decode;
+    int hwaccel_decode;
+
 
 #ifdef __LIBHB__
     /* Internal data */
@@ -1223,7 +1225,8 @@ struct hb_title_s
 #define HB_DECODE_SUPPORT_NVDEC          0x04
 #define HB_DECODE_SUPPORT_VIDEOTOOLBOX   0x08
 
-#define HB_DECODE_SUPPORT_HWACCEL        (HB_DECODE_SUPPORT_NVDEC | HB_DECODE_SUPPORT_VIDEOTOOLBOX)
+#define HB_DECODE_SUPPORT_SW    0x01 // software (libavcodec or mpeg2dec)
+#define HB_DECODE_SUPPORT_HWACCEL 0x04 // HWAccel
 #define HB_DECODE_SUPPORT_FORCE_HW       0x80000000
 
     hb_metadata_t * metadata;

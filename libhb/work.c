@@ -322,7 +322,7 @@ hb_work_object_t* hb_video_encoder(hb_handle_t *h, int vcodec)
             w = hb_get_work(h, WORK_ENCVT);
             break;
 #endif
-#if HB_PROJECT_FEATURE_MF
+#if _WIN32 //HB_PROJECT_FEATURE_MF
         case HB_VCODEC_FFMPEG_MF_H264:
             w = hb_get_work(h, WORK_ENCAVCODEC);
             w->codec_param = AV_CODEC_ID_H264;

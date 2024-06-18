@@ -50,6 +50,9 @@ struct hb_work_private_s
     } frame_info[FRAME_INFO_SIZE];
 
     hb_chapter_queue_t * chapter_queue;
+
+    struct SwsContext  * sws_context_to_nv12;
+    hb_buffer_t        * nv12_buf;
 };
 
 int  encavcodecInit( hb_work_object_t *, hb_job_t * );
@@ -737,6 +740,19 @@ int encavcodecInit( hb_work_object_t * w, hb_job_t * job )
         job->vcodec == HB_VCODEC_FFMPEG_MF_H265)
     {
         av_dict_set(&av_opts, "hw_encoding", "1", 0);
+
+        pv->sws_context_to_nv12 = hb_sws_get_context(
+                                    job->width, job->height,
+                                    AV_PIX_FMT_YUV420P, AVCOL_RANGE_MPEG,
+                                    job->width, job->height,
+                                    AV_PIX_FMT_NV12, AVCOL_RANGE_MPEG,
+                                    SWS_LANCZOS|SWS_ACCURATE_RND,
+                                    SWS_CS_DEFAULT);
+
+        pv->nv12_buf = hb_frame_buffer_init(
+                         AV_PIX_FMT_NV12, job->width, job->height);
+        
+        context->pix_fmt = AV_PIX_FMT_NV12;
     }
 
     if (job->vcodec == HB_VCODEC_FFMPEG_MF_H265)
@@ -884,6 +900,14 @@ void encavcodecClose( hb_work_object_t * w )
             avcodec_flush_buffers( pv->context );
         }
         hb_avcodec_free_context(&pv->context);
+    }
+    if (pv->sws_context_to_nv12 != NULL)
+    {
+        sws_freeContext(pv->sws_context_to_nv12);
+    }
+    if (pv->nv12_buf != NULL)
+    {
+        hb_buffer_close(&pv->nv12_buf);
     }
     if( pv->file )
     {

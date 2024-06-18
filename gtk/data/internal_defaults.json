@@ -65,6 +65,7 @@
         "VideoFramerateVFR": true,
         "PictureDeinterlaceDecomb": false,
         "VideoPresetSlider": 0,
+        "VideoHWDecode": true,
         "x264ZeroLatency": false,
         "x264FastDecode": false
     },

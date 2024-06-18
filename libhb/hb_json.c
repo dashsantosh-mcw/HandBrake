@@ -626,7 +626,7 @@ hb_dict_t* hb_job_to_dict( const hb_job_t * job )
             "Den",              hb_value_int(job->par.den),
         "Video",
             "Encoder",          hb_value_int(job->vcodec),
-            "HardwareDecode",   hb_value_int(job->hw_decode),
+            "HWDecode",         hb_value_bool(job->hwaccel_decode),
             "QSV",
                 "Decode",       hb_value_bool(job->qsv.decode),
                 "AsyncDepth",   hb_value_int(job->qsv.async_depth),
@@ -1146,7 +1146,7 @@ hb_job_t* hb_dict_to_job( hb_handle_t * h, hb_dict_t *dict )
     "   s?o,"
     "   s?o,"
     "   s?i, s?i, s?i,"
-    "   s?i,"
+    "   s?b,"
     "   s?{s?b, s?i, s?i}},"
     // Audio {CopyMask, FallbackEncoder, AudioList}
     "s?{s?o, s?o, s?o},"
@@ -1202,7 +1202,7 @@ hb_job_t* hb_dict_to_job( hb_handle_t * h, hb_dict_t *dict )
             "ColorPrimariesOverride", unpack_i(&job->color_prim_override),
             "ColorTransferOverride",  unpack_i(&job->color_transfer_override),
             "ColorMatrixOverride",    unpack_i(&job->color_matrix_override),
-            "HardwareDecode",         unpack_i(&job->hw_decode),
+            "HWDecode",             unpack_b(&job->hwaccel_decode),
             "QSV",
                 "Decode",           unpack_b(&job->qsv.decode),
                 "AsyncDepth",       unpack_i(&job->qsv.async_depth),

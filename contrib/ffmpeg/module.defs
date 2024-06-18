@@ -137,6 +137,12 @@ else ifeq (1-mingw,$(HOST.cross)-$(HOST.system))
         --disable-vulkan \
         --pkg-config=$(PKGCONFIG.exe) \
         --pkg-config-flags="--static"
+        --enable-hwaccel=h264_d3d11va \
+        --enable-hwaccel=hevc_d3d11va \
+        --enable-hwaccel=h264_d3d11va2 \
+        --enable-hwaccel=hevc_d3d11va2 \
+        --enable-encoder=h264_mf \
+        --enable-encoder=hevc_mf
     FFMPEG.GCC.args.extra += -fno-common
     FFMPEG.GCC.args.extra-ldflags = -static-libgcc -static-libstdc++ -static
 else ifeq (darwin,$(HOST.system))
