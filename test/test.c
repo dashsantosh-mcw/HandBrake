@@ -2237,7 +2237,7 @@ static int ParseOptions( int argc, char ** argv )
             { "enable-qsv-decoding",  no_argument,       &qsv_decode, 1,                  },
 #endif
             { "disable-hw-decoding", no_argument,        &hw_decode,  0, },
-            { "enable-hw-decoding",  required_argument,  NULL,  HW_DECODE, },
+            { "enable-hw-decoding",  no_argument,  &hw_decode,  1, },
 
             { "format",      required_argument, NULL,    'f' },
             { "input",       required_argument, NULL,    'i' },

@@ -1,0 +1,10 @@
+diff a/libhb/module.defs b/libhb/module.defs	(rejected hunks)
+@@ -170,7 +170,7 @@ else
+ endif
+ 
+ LIBHB.GCC.args.extra.dylib++ += -Wl,--out-implib,$(LIBHB.lib)
+-LIBHB.GCC.l += bcrypt ws2_32 uuid ole32
++LIBHB.GCC.l += bcrypt ws2_32 uuid ole32 mfplat strmiids
+ ifeq (1,$(FEATURE.mf))
+     LIBHB.GCC.l += mfplat strmiids
+ endif

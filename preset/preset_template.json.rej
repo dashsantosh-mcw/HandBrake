@@ -1,0 +1,9 @@
+diff a/preset/preset_template.json b/preset/preset_template.json	(rejected hunks)
+@@ -120,6 +120,7 @@
+         "VideoQualityType": 2,
+         "VideoQualitySlider": 20.0,
+         "VideoQSVDecode": false,
++        "VideoHWDecode": false,
+         "VideoTwoPass": false,
+         "VideoTurboTwoPass": false,
+         "x264Option": "",
