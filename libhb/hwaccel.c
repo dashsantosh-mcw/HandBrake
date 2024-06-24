@@ -319,10 +319,13 @@ int hb_hwaccel_decode_is_enabled(hb_job_t *job)
     {
         if (job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW || job->hw_decode & HB_DECODE_SUPPORT_MF)
         {
-            return hb_hwaccel_is_enabled(job);
+            int ret = hb_hwaccel_is_enabled(job);
+            hb_log("hw decode enabled: %i", ret);
+            return ret;
         }
         else
         {
+            hb_log("inside full pipeline");
             return hb_hwaccel_is_full_hardware_pipeline_enabled(job);
         }
     }

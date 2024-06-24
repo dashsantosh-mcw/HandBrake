@@ -1818,7 +1818,7 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
     w->private_data = pv;
     pv->job         = job;
     pv->next_pts    = (int64_t)AV_NOPTS_VALUE;
-    pv->hw_pix_fmt  = AV_PIX_FMT_NONE;
+    pv->hw_pix_fmt  = AV_PIX_FMT_D3D11;
     if ( job )
         pv->title = job->title;
     else
