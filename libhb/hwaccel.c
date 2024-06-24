@@ -307,7 +307,7 @@ int hb_hwaccel_is_enabled(hb_job_t *job)
 
 int hb_hwaccel_is_full_hardware_pipeline_enabled(hb_job_t *job)
 {
-    return 1;
+    return 0;
     // hb_hwaccel_is_enabled(job) &&
     //         are_filters_supported(job->list_filter, job->hw_decode) &&
     //         is_encoder_supported(job->vcodec);
