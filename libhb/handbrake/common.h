@@ -826,7 +826,7 @@ struct hb_job_s
         } enc_info;
     } qsv;
 
-    int hwaccel_decode;
+    int hw_decode;
 
 #ifdef __LIBHB__
     /* Internal data */

@@ -1813,7 +1813,7 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
     }
 #endif
 
-if ( job && job->hwaccel_decode )
+if ( job && job->hw_decode )
     {
         enum AVHWDeviceType hw_type = av_hwdevice_find_type_by_name("d3d11va");
         pv->hw_pix_fmt = AV_PIX_FMT_NONE;

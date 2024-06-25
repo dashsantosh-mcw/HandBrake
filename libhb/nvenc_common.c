@@ -444,7 +444,7 @@ int hb_nvdec_is_usable(hb_job_t *job)
 
 int hb_nvdec_is_enabled(hb_job_t *job)
 {
-    return ((job != NULL && job->hwaccel_decode == 4) && hb_nvdec_is_usable(job) &&
+    return ((job != NULL && job->hw_decode == 4) && hb_nvdec_is_usable(job) &&
             (job->title->video_decode_support & HB_DECODE_SUPPORT_NVDEC));
 }
 
@@ -452,7 +452,7 @@ void hb_nvdec_disable(hb_job_t *job)
 {
     if (job)
     {
-        job->hwaccel_decode = HB_DECODE_SUPPORT_SW;
+        job->hw_decode = HB_DECODE_SUPPORT_SW;
         job->title->video_decode_support = HB_DECODE_SUPPORT_SW;
     }
 }
