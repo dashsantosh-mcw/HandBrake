@@ -1911,11 +1911,16 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
         pv->context->get_format = hw_hwaccel_get_hw_format;
         pv->context->opaque = job;
         av_buffer_replace(&pv->context->hw_device_ctx, w->hw_device_ctx);
-
-        if (job == NULL)
+        if(job){
+            job->hw_pix_fmt = pv->hw_pix_fmt;
+            hb_log("job->pix_fmt from dec init: %d, %d", job->hw_pix_fmt, pv->hw_pix_fmt);
+        }
+        if (pv->hw_frame == NULL)
         {
+            hb_log("job is NULL, allocating hw_frame");
             pv->hw_frame = av_frame_alloc();
         }
+        hb_log("hw_frame: %d", pv->hw_frame);
     }
 
     if ( pv->title->opaque_priv )
