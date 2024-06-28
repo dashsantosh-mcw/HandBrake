@@ -85,6 +85,10 @@ int hb_hwaccel_hw_ctx_init(int codec_id, int hw_decode, void **hw_device_ctx)
     {
         hw_type = av_hwdevice_find_type_by_name("cuda");
     }
+    else if (hw_decode & HB_DECODE_SUPPORT_MF)
+    {
+        hw_type = av_hwdevice_find_type_by_name("d3d11va");
+    }
 
     if (hw_type != AV_HWDEVICE_TYPE_NONE)
     {
@@ -165,6 +169,7 @@ AVBufferRef *hb_hwaccel_init_hw_frames_ctx(AVBufferRef *hw_device_ctx,
     AVHWFramesContext *frames_ctx = (AVHWFramesContext*)hw_frames_ctx->data;
     frames_ctx->format = hw_fmt;
     frames_ctx->sw_format = sw_fmt;
+    frames_ctx->initial_pool_size = 64;
     frames_ctx->width = width;
     frames_ctx->height = height;
     if (0 != av_hwframe_ctx_init(hw_frames_ctx))
@@ -299,7 +304,7 @@ int hb_hwaccel_decode_is_enabled(hb_job_t *job)
 {
     if (job != NULL)
     {
-        if (job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW)
+        if (job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW || job->hw_decode & HB_DECODE_SUPPORT_MF)
         {
             return hb_hwaccel_is_enabled(job);
         }

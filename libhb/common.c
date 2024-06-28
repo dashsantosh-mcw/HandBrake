@@ -6573,6 +6573,13 @@ static int pix_hw_fmt_is_supported(hb_job_t *job, int pix_fmt)
         }
 #endif
     }
+    else if (pix_fmt == AV_PIX_FMT_D3D11)
+    {
+        if (job->hw_decode & HB_DECODE_SUPPORT_MF)
+        {
+            return 1;
+        }
+    }
     else if (hb_hwaccel_is_full_hardware_pipeline_enabled(job))
     {
         if (pix_fmt == AV_PIX_FMT_CUDA &&
@@ -6592,7 +6599,7 @@ static int pix_hw_fmt_is_supported(hb_job_t *job, int pix_fmt)
 
 static const enum AVPixelFormat hw_pipeline_pix_fmts[] =
 {
-    AV_PIX_FMT_QSV, AV_PIX_FMT_CUDA, AV_PIX_FMT_VIDEOTOOLBOX, AV_PIX_FMT_NONE
+    AV_PIX_FMT_QSV, AV_PIX_FMT_CUDA, AV_PIX_FMT_VIDEOTOOLBOX, AV_PIX_FMT_D3D11, AV_PIX_FMT_NONE
 };
 
 int hb_get_best_hw_pix_fmt(hb_job_t *job)

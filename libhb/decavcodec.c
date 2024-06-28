@@ -598,6 +598,8 @@ static void closePrivData( hb_work_private_t ** ppv )
         }
         if ( pv->context )
         {
+            if (pv->context->hw_device_ctx)
+                av_buffer_unref(&pv->context->hw_device_ctx);
             hb_avcodec_free_context(&pv->context);
         }
         av_packet_free(&pv->pkt);
@@ -1653,6 +1655,16 @@ static void filter_video(hb_work_private_t *pv)
  * The output of this function is stored in 'pv->list', which contains a list
  * of zero or more decoded packets.
  */
+void printAVCodecContext(AVCodecContext *ctx)
+{
+    hb_error("AVCodecContext data:\n");
+    hb_error("  codec_type: %d\n", ctx->codec_type);
+    hb_error("  codec_id: %d\n", ctx->codec_id);
+    hb_error("  width: %d\n", ctx->width);
+    hb_error("  height: %d\n", ctx->height);
+     hb_error("  pix_fmt: %d\n", ctx->pix_fmt);
+    // Print other fields as needed
+}
 static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 {
     int got_picture = 0, oldlevel = 0, ret;
@@ -2481,6 +2493,10 @@ static int decavcodecvInfo( hb_work_object_t *w, hb_work_info_t *info )
     else if (pv->context->pix_fmt == AV_PIX_FMT_VIDEOTOOLBOX)
     {
         info->video_decode_support |= HB_DECODE_SUPPORT_VIDEOTOOLBOX;
+    }
+    else if (pv->context->pix_fmt == AV_PIX_FMT_D3D11)
+    {
+        info->video_decode_support |= HB_DECODE_SUPPORT_MF;
     }
 
     return 1;
