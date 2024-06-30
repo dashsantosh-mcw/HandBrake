@@ -2209,7 +2209,6 @@ void hb_work_loop( void * _w )
     while ((w->die == NULL || !*w->die) && !*w->done &&
            w->status != HB_WORK_DONE)
     {
-        // fifo_in == NULL means this is a data source (e.g. reader)
         if (w->fifo_in != NULL)
         {
             buf_in = hb_fifo_get_wait( w->fifo_in );
