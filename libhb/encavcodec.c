@@ -754,6 +754,7 @@ int encavcodecInit( hb_work_object_t * w, hb_job_t * job )
             context->max_b_frames = 1;
         }
         av_dict_set(&av_opts, "hw_encoding", "1", 0);
+        context->pix_fmt = AV_PIX_FMT_NV12;
     }
 
     if( job->pass_id == HB_PASS_ENCODE_ANALYSIS ||
