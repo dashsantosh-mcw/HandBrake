@@ -7,6 +7,6 @@ GCC.args.dylib  = -shared
 GCC.args.g.none = -g0
 GCC.args.g.min  = -g1
 GCC.args.g.std  = -g2
-GCC.args.g.max  = -g3
+GCC.args.g.max  = -g3 -gcodeview
 
 GCC.args.extra += -mno-ms-bitfields
