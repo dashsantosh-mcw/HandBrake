@@ -1088,7 +1088,8 @@ namespace HandBrakeWPF.ViewModels
         public bool IsVceAvailable { get; } = HandBrakeHardwareEncoderHelper.IsVceH264Available;
 
         public bool IsNvencAvailable { get; } = HandBrakeHardwareEncoderHelper.IsNVEncH264Available;
-        public bool IsDirectXAvailable { get; } = true;
+
+        public bool IsDirectXAvailable { get; } = HandBrakeHardwareEncoderHelper.IsDirectXAvailable;
 
         public bool IsUseQsvDecAvailable => this.IsQuickSyncAvailable && this.EnableQuickSyncDecoding;
 
