@@ -599,7 +599,9 @@ static void closePrivData( hb_work_private_t ** ppv )
         if ( pv->context )
         {
             if (pv->context->hw_device_ctx)
+            {
                 av_buffer_unref(&pv->context->hw_device_ctx);
+            }
             hb_avcodec_free_context(&pv->context);
         }
         av_packet_free(&pv->pkt);
@@ -1882,7 +1884,7 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
         pv->context->opaque = job;
         av_buffer_replace(&pv->context->hw_device_ctx, w->hw_device_ctx);
 
-        if (job == NULL || (pv->hw_frame==NULL && job->hw_decode & HB_DECODE_SUPPORT_MF) ||
+        if (job == NULL ||
              (job->hw_pix_fmt == AV_PIX_FMT_NONE && job->hw_decode & HB_DECODE_SUPPORT_FORCE_HW))
         {
             pv->hw_frame = av_frame_alloc();
@@ -2492,7 +2494,7 @@ static int decavcodecvInfo( hb_work_object_t *w, hb_work_info_t *info )
     }
     else if (pv->context->pix_fmt == AV_PIX_FMT_D3D11)
     {
-        info->video_decode_support |= HB_DECODE_SUPPORT_MF;
+        info->video_decode_support |= (HB_DECODE_SUPPORT_MF | HB_DECODE_SUPPORT_FORCE_HW);
     }
 
     return 1;
