@@ -375,7 +375,6 @@ static void mask_dilate_work(void *thread_args_v)
         dst += stride;
     }
 }
-
 #else
 static void mask_dilate_work(void *thread_args_v)
 {
@@ -546,7 +545,6 @@ static void mask_erode_work(void *thread_args_v)
         dst += stride;
     }
 }
-
 #else
 static void mask_erode_work(void *thread_args_v)
 {
@@ -723,7 +721,6 @@ static void mask_filter_work(void *thread_args_v)
 	    }
     }
 }
-
 #else
 static void mask_filter_work(void *thread_args_v)
 {
