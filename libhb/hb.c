@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <turbojpeg.h>
+#include <arm_neon.h>
 
 #if HB_PROJECT_FEATURE_QSV
 #include "handbrake/qsv_common.h"
@@ -27,6 +28,8 @@
 #include <pthread.h>
 #endif
 #endif
+
+#define DETECT_COMB_OPT     1
 
 struct hb_handle_s
 {
@@ -1045,6 +1048,118 @@ fail:
  * @param prog_diff   Sensitivity for detecting different colors on progressive frames
  * @param prog_threshold Sensitivity for flagging progressive frames as combed
  */
+
+
+#if  DETECT_COMB_OPT
+int hb_detect_comb( hb_buffer_t * buf, int color_equal, int color_diff, int threshold, int prog_equal, int prog_diff, int prog_threshold )
+{
+    int j, k, n, off, cc[3] = {0};
+	// int flag[3] ; // debugging flag
+    uint16_t cc_1 = 0;
+    uint16_t cc_2 = 0;
+
+    if ( buf->s.flags & 16 )
+    {
+        /* Frame is progressive, be more discerning. */
+        color_diff = prog_diff;
+        color_equal = prog_equal;
+        threshold = prog_threshold;
+    }
+
+    uint8x16_t color_diff_vec = vdupq_n_u8((uint8_t)color_diff);
+    uint8x16_t color_equal_vec = vdupq_n_u8((uint8_t)color_equal);
+    uint8x16_t one_mask = vdupq_n_u8(1);
+
+    /* One pas for Y, one pass for Cb, one pass for Cr */
+    for( k = 0; k <= buf->f.max_plane; k++ )
+    {
+        uint8_t * data = buf->plane[k].data;
+        int width = buf->plane[k].width;
+        int stride = buf->plane[k].stride;
+        int height = buf->plane[k].height;
+
+        uint8x16_t cc_1_vec = vdupq_n_u8(0);
+        uint8x16_t cc_2_vec = vdupq_n_u8(0);
+
+        for( j = 0; j < width; j += 16 )
+        {
+            off = 0;
+
+            for( n = 0; n < ( height - 4 ); n = n + 2 )
+            {            
+                uint8x16_t s1v = vld1q_u8(data + off + j);
+                uint8x16_t s2v = vld1q_u8(data + off + j + stride);
+                uint8x16_t s3v = vld1q_u8(data + off + j + stride * 2);
+                uint8x16_t s4v = vld1q_u8(data + off + j + stride * 3);
+
+                uint8x16_t s1s3 = vabdq_u8(s1v, s3v);
+                uint8x16_t s1s3eq = vcleq_u8(s1s3, color_equal_vec);
+
+                uint8x16_t s1s2 = vabdq_u8(s1v, s2v);
+                uint8x16_t s1s2df = vcgtq_u8(s1s2, color_diff_vec);
+
+                uint8x16_t cc_1_v = vandq_u8(s1s3eq, s1s2df);
+                
+                cc_1_vec = vaddq_u8(cc_1_vec, cc_1_v);
+                
+                uint8x16_t s2s4 = vabdq_u8(s2v, s4v);
+                uint8x16_t s2s4eq = vcleq_u8(s2s4, color_equal_vec);
+
+                uint8x16_t s2s3 = vabdq_u8(s2v, s3v);
+                uint8x16_t s2s3df = vcgtq_u8(s2s3, color_diff_vec);
+                uint8x16_t cc_2_v = vandq_u8(s2s4eq, s2s3df);
+
+                cc_2_vec = vaddq_u8(cc_2_vec, cc_2_v);
+                
+                /* Now move down 2 horizontal lines before starting over.*/
+                off += 2 * stride;
+            }
+        }
+
+        uint8x16_t cc_sum_v = vaddq_u8(cc_1_vec, cc_2_vec);
+        uint8_t cc_sum[16];
+        vst1q_u8(cc_sum, cc_sum_v);
+
+        uint32_t total_cc_sum = 0;
+        for (int i = 0; i < 16; ++i)
+        {
+            total_cc_sum += cc_sum[i];
+        }
+
+        // compare results
+        /*  The final cc score for a plane is the percentage of combed pixels it contains.
+            Because sensitivity goes down to hundredths of a percent, multiply by 1000
+            so it will be easy to compare against the threshold value which is an integer. */
+        cc[k] = (int)( total_cc_sum * 1000.0 / ( width * height ) );
+	//MCW_LOG("cc[%d] = %d", k, cc[k]);
+    }
+
+
+    /* HandBrake previews are all yuv420, so weight the average percentage of all 3 planes accordingly. */
+    int average_cc = ( 2 * cc[0] + ( cc[1] / 2 ) + ( cc[2] / 2 ) ) / 3;
+
+#if HB_DEBUG_MCW
+    gettimeofday(&end_us, NULL);
+    int timeuse = 1000000 * (end_us.tv_sec - start_us.tv_sec) + end_us.tv_usec - start_us.tv_usec;
+    hb_log("dur -> %d us", timeuse);
+#endif
+    /* Now see if that average percentage of combed pixels surpasses the threshold percentage given by the user.*/
+    if( average_cc > threshold )
+    {
+#if 0
+            hb_log("Average %i combed (Threshold %i) %i/%i/%i | PTS: %"PRId64" (%fs) %s", average_cc, threshold, cc[0], cc[1], cc[2], buf->start, (float)buf->start / 90000, (buf->flags & 16) ? "Film" : "Video" );
+#endif
+        return 1;
+    }
+
+#if 0
+    hb_log("SKIPPED Average %i combed (Threshold %i) %i/%i/%i | PTS: %"PRId64" (%fs) %s", average_cc, threshold, cc[0], cc[1], cc[2], buf->start, (float)buf->start / 90000, (buf->flags & 16) ? "Film" : "Video" );
+#endif
+
+    /* Reaching this point means no combing detected. */
+    return 0;
+}
+#else
 int hb_detect_comb( hb_buffer_t * buf, int color_equal, int color_diff, int threshold, int prog_equal, int prog_diff, int prog_threshold )
 {
     int j, k, n, off, cc_1, cc_2, cc[3] = {0};
@@ -1125,7 +1240,7 @@ int hb_detect_comb( hb_buffer_t * buf, int color_equal, int color_diff, int thre
     return 0;
 
 }
-
+#endif
 static void hflip_crop_pad(int * dst, int * src, int hflip)
 {
     if (hflip)

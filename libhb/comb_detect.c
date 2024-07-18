@@ -28,8 +28,14 @@ Original "Faster" settings:
 #define FILTER_CLASSIC 1
 #define FILTER_ERODE_DILATE 2
 
+#define MASK_FILTER_OPT     1
+#define MASK_DILATE_OPT     1
+#define MASK_ERODE_OPT      1
+
 #include "handbrake/handbrake.h"
 #include "handbrake/taskset.h"
+#include <arm_neon.h>
+
 
 typedef struct comb_detect_thread_arg_s
 {
@@ -271,6 +277,106 @@ static void check_combing_mask(hb_filter_private_t *pv, int segment, int start, 
     }
 }
 
+#if  MASK_DILATE_OPT
+static void mask_dilate_work(void *thread_args_v)
+{
+    comb_detect_thread_arg_t *thread_args = thread_args_v;
+    hb_filter_private_t *pv = thread_args->pv;
+
+    const int segment_start = thread_args->segment_start[0];
+    const int segment_stop = segment_start + thread_args->segment_height[0];
+
+    const int dilation_threshold = 4;
+
+    const int width = pv->mask_filtered->plane[0].width;
+    const int height = pv->mask_filtered->plane[0].height;
+    const int stride = pv->mask_filtered->plane[0].stride;
+
+    int start, stop, p, c, n;
+
+    if (segment_start == 0)
+    {
+        start = 1;
+        p = 0;
+        c = 1;
+        n = 2;
+    }
+    else
+    {
+        start = segment_start;
+        p = segment_start - 1;
+        c = segment_start;
+        n = segment_start + 1;
+    }
+
+    if (segment_stop == height)
+    {
+        stop = height -1;
+    }
+    else
+    {
+        stop = segment_stop;
+    }
+
+    const uint8_t *curp = &pv->mask_filtered->plane[0].data[p * stride + 1];
+    const uint8_t *cur  = &pv->mask_filtered->plane[0].data[c * stride + 1];
+    const uint8_t *curn = &pv->mask_filtered->plane[0].data[n * stride + 1];
+    uint8_t *dst = &pv->mask_temp->plane[0].data[c * stride + 1];
+
+    uint8x8_t threshold = vdup_n_u8(dilation_threshold);
+
+    uint8x8_t result_if_nonzero = vdup_n_u8(1);
+    for (int yy = start; yy < stop; yy++)
+    {
+	    int xx=0;
+	    for (; xx < width - 8; xx+=8)
+	    {
+		    uint8x8_t cur_vec=vld1_u8(&cur[xx]);
+		    uint8x8_t curp_vec=vld1_u8(&curp[xx]);
+		    uint8x8_t curn_vec = vld1_u8(&curn[xx]);
+
+		    uint8x8_t curp_left = vext_u8(curp_vec,vld1_u8(&curp[xx+8]), 1);
+		    uint8x8_t curp_right = vext_u8(curp_vec,vld1_u8(&curp[xx+8]), 2);
+	
+		    uint8x8_t cur_left = vext_u8(cur_vec, vld1_u8(&cur[xx+8]), 1);
+		    uint8x8_t cur_right = vext_u8(cur_vec, vld1_u8(&cur[xx+8]), 2);
+	
+		    uint8x8_t curn_left = vext_u8(curn_vec, vld1_u8(&curn[xx+8]), 1);
+		    uint8x8_t curn_right = vext_u8(curn_vec, vld1_u8(&curn[xx+8]), 2);
+	
+		    uint8x8_t sum_p = vadd_u8(vadd_u8(curp_left, curp_vec),curp_right);
+		    uint8x8_t sum_c=vadd_u8(cur_left, cur_right);
+		    uint8x8_t sum_n=vadd_u8(vadd_u8(curn_left, curn_vec), curn_right);
+		    uint8x8_t sum=vadd_u8(vadd_u8(sum_p,sum_c), sum_n);
+
+		    uint8x8_t result=vcge_u8(sum, threshold);
+		    uint8x8_t nonzero_mask = vcgt_u8(cur_vec, vdup_n_u8(0));
+
+		    result = vbsl_u8(nonzero_mask, result_if_nonzero, result);
+		    vst1_u8(&dst[xx], result);
+	    }
+	    for (; xx < width - 1; xx++)
+	    {
+		    if (cur[xx])
+		    {
+			    dst[xx] = 1;
+			    continue;
+		    }
+
+		    const int count = curp[xx-1] + curp[xx] + curp[xx+1] +
+		    cur[xx-1] + cur [xx+1] +
+		    curn[xx-1] + curn[xx] + curn[xx+1];
+
+		    dst[xx] = count >= dilation_threshold;
+	    }
+        curp += stride;
+        cur += stride;
+        curn += stride;
+        dst += stride;
+    }
+}
+
+#else
 static void mask_dilate_work(void *thread_args_v)
 {
     comb_detect_thread_arg_t *thread_args = thread_args_v;
@@ -338,7 +444,110 @@ static void mask_dilate_work(void *thread_args_v)
         dst += stride;
     }
 }
+#endif
 
+#if MASK_ERODE_OPT
+static void mask_erode_work(void *thread_args_v)
+{
+    comb_detect_thread_arg_t *thread_args = thread_args_v;
+    hb_filter_private_t *pv = thread_args->pv;
+
+    const int segment_start = thread_args->segment_start[0];
+    const int segment_stop = segment_start + thread_args->segment_height[0];
+
+    const int erosion_threshold = 2;
+
+    const int width = pv->mask_filtered->plane[0].width;
+    const int height = pv->mask_filtered->plane[0].height;
+    const int stride = pv->mask_filtered->plane[0].stride;
+
+    int start, stop, p, c, n;
+
+    if (segment_start == 0)
+    {
+        start = 1;
+        p = 0;
+        c = 1;
+        n = 2;
+    }
+    else
+    {
+        start = segment_start;
+        p = segment_start - 1;
+        c = segment_start;
+        n = segment_start + 1;
+    }
+
+    if (segment_stop == height)
+    {
+        stop = height -1;
+    }
+    else
+    {
+        stop = segment_stop;
+    }
+
+    const uint8_t *curp = &pv->mask_temp->plane[0].data[p * stride + 1];
+    const uint8_t *cur  = &pv->mask_temp->plane[0].data[c * stride + 1];
+    const uint8_t *curn = &pv->mask_temp->plane[0].data[n * stride + 1];
+    uint8_t *dst = &pv->mask_filtered->plane[0].data[c * stride + 1];
+
+    uint8x8_t threshold = vdup_n_u8(erosion_threshold);
+    uint8x8_t result_if_zero = vdup_n_u8(1);
+    for (int yy = start; yy < stop; yy++)
+    {
+	    int xx=0;
+	    for (; xx < width - 8; xx+=8)
+	    {
+		    uint8x8_t curp_vec=vld1_u8(&curp[xx]);
+		    uint8x8_t cur_vec=vld1_u8(&cur[xx]);
+		    uint8x8_t curn_vec = vld1_u8(&curn[xx]);
+
+		    uint8x8_t curp_vec_2 = vld1_u8(&curp[xx+8]);
+		    uint8x8_t curp_left = vext_u8(curp_vec,curp_vec_2, 1);
+		    uint8x8_t curp_right = vext_u8(curp_vec,curp_vec_2, 2);
+
+		    uint8x8_t cur_vec_2 = vld1_u8(&cur[xx+8]);
+		    uint8x8_t cur_left = vext_u8(cur_vec, cur_vec_2, 1);
+		    uint8x8_t cur_right = vext_u8(cur_vec, cur_vec_2, 2);
+
+		    uint8x8_t curn_vec_2 = vld1_u8(&curn[xx+8]);
+		    uint8x8_t curn_left = vext_u8(curn_vec, curn_vec_2, 1);
+		    uint8x8_t curn_right = vext_u8(curn_vec, curn_vec_2, 2);
+
+		    uint8x8_t sum_p = vadd_u8(vadd_u8(curp_left, curp_vec),curp_right);
+		    uint8x8_t sum_c=vadd_u8(cur_left, cur_right);
+		    uint8x8_t sum_n=vadd_u8(vadd_u8(curn_left, curn_vec), curn_right);
+
+		    uint8x8_t sum=vadd_u8(vadd_u8(sum_p, sum_c), sum_n);
+		    uint8x8_t result=vcge_u8(sum, threshold);
+
+		    uint8x8_t zero_mask = vclt_u8(cur_vec, vdup_n_u8(1));
+		    result = vbsl_u8(zero_mask, result_if_zero, result);
+		    vst1_u8(&dst[xx], result);
+	    }
+        for (; xx < width - 1; xx++)
+        {
+            if (cur[xx] == 0)
+            {
+                dst[xx] = 0;
+                continue;
+            }
+
+            const int count = curp[xx-1] + curp[xx] + curp[xx+1] +
+                              cur [xx-1] +            cur [xx+1] +
+                              curn[xx-1] + curn[xx] + curn[xx+1];
+
+            dst[xx] = count >= erosion_threshold;
+        }
+        curp += stride;
+        cur += stride;
+        curn += stride;
+        dst += stride;
+    }
+}
+
+#else
 static void mask_erode_work(void *thread_args_v)
 {
     comb_detect_thread_arg_t *thread_args = thread_args_v;
@@ -406,7 +615,116 @@ static void mask_erode_work(void *thread_args_v)
         dst += stride;
     }
 }
+#endif
 
+#if  MASK_FILTER_OPT
+static void mask_filter_work(void *thread_args_v)
+{
+    comb_detect_thread_arg_t *thread_args = thread_args_v;
+    hb_filter_private_t *pv = thread_args->pv;
+
+    const int width = pv->mask->plane[0].width;
+    const int height = pv->mask->plane[0].height;
+    const int stride = pv->mask->plane[0].stride;
+
+    int start, stop, p, c, n;
+    int segment_start = thread_args->segment_start[0];
+    int segment_stop = segment_start + thread_args->segment_height[0];
+
+    if (segment_start == 0)
+    {
+        start = 1;
+        p = 0;
+        c = 1;
+        n = 2;
+    }
+    else
+    {
+        start = segment_start;
+        p = segment_start - 1;
+        c = segment_start;
+        n = segment_start + 1;
+    }
+
+    if (segment_stop == height)
+    {
+        stop = height - 1;
+    }
+    else
+    {
+        stop = segment_stop;
+    }
+
+    const uint8_t *curp = &pv->mask->plane[0].data[p * stride + 1];
+    const uint8_t *cur  = &pv->mask->plane[0].data[c * stride + 1];
+    const uint8_t *curn = &pv->mask->plane[0].data[n * stride + 1];
+    uint8_t *dst = (pv->filter_mode == FILTER_CLASSIC) ?
+                     &pv->mask_filtered->plane[0].data[c * stride + 1] :
+                     &pv->mask_temp->plane[0].data[c * stride + 1] ;
+
+
+    if (pv->filter_mode == FILTER_CLASSIC)
+    {
+	    for (int yy = start; yy < stop; yy++)
+	    {
+		    int xx=0;
+		    for (; xx < width - 8; xx+=8)
+		    {
+			    uint8x8_t cur_vec = vld1_u8(&cur[xx]);
+			    uint8x8_t cur_left = vext_u8(cur_vec, vld1_u8(&cur[xx+8]), 1);
+			    uint8x8_t cur_right = vext_u8(cur_vec, vld1_u8(&cur[xx+8]), 2);
+	
+			    uint8x8_t h_count = vand_u8(vand_u8(cur_left, cur_vec), cur_right);
+	
+			    vst1_u8(&dst[xx], h_count);
+		    }
+		    for (; xx < width - 1; xx++)
+		    {
+			    const int h_count = cur[xx-1] & cur[xx] & cur[xx+1];
+	
+			    dst[xx] = h_count;
+		    }
+		    curp += stride;
+		    cur += stride;
+		    curn +=stride;
+		    dst+=stride;
+	    }
+    }
+    else
+    {
+	    for (int yy = start; yy < stop; yy++)
+	    {
+		    int xx=0;
+		    for (; xx < width - 8; xx+=8)
+		    {
+			    uint8x8_t curp_vec = vld1_u8(&curp[xx+1]);
+			    uint8x8_t cur_vec = vld1_u8(&cur[xx]);
+			    uint8x8_t curn_vec = vld1_u8(&curn[xx+1]);
+
+			    uint8x8_t cur_left= vext_u8(cur_vec, vld1_u8(&cur[xx +8]), 1);
+			    uint8x8_t cur_right = vext_u8(cur_vec, vld1_u8(&cur[xx +8]), 2);
+
+			    uint8x8_t h_count = vand_u8(vand_u8(cur_left, cur_vec),cur_right);
+			    uint8x8_t v_count = vand_u8(vand_u8(curp_vec, cur_vec),curn_vec);
+
+			    uint8x8_t result = vand_u8(h_count, v_count);
+			    vst1_u8(&dst[xx], result);
+		    }
+		    for (; xx < width - 1; xx++)
+		    {
+		    	const int h_count = cur[xx-1] & cur[xx] & cur[xx+1];
+
+			    dst[xx] = h_count;
+		    }
+		    curp += stride;
+		    cur += stride;
+		    curn +=stride;
+		    dst+=stride;
+	    }
+    }
+}
+
+#else
 static void mask_filter_work(void *thread_args_v)
 {
     comb_detect_thread_arg_t *thread_args = thread_args_v;
@@ -473,7 +791,7 @@ static void mask_filter_work(void *thread_args_v)
         dst += stride;
     }
 }
-
+#endif
 static void comb_detect_check_work(void *thread_args_v)
 {
     comb_detect_thread_arg_t *thread_args = thread_args_v;
