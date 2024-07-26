@@ -1441,8 +1441,7 @@ static void sanitize_filter_list_pre(hb_job_t *job, hb_geometry_t src_geo)
                 height = temp;
             }
 
-            if (src_geo.width == width && src_geo.height == height &&
-                top == 0 && bottom == 0 && left == 0 && right == 0)
+            if (1)
             {
                 hb_list_rem(list, filter);
                 hb_filter_close(&filter);

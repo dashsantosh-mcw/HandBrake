@@ -1,0 +1,34 @@
+From 53f338d02558e20dbd46fc697ab5c34071331493 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <santdas36@gmail.com>
+Date: Wed, 24 Jul 2024 14:06:18 +0530
+Subject: [PATCH] fix: force scale
+
+---
+ libavcodec/mfenc.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/mfenc.c b/libavcodec/mfenc.c
+index 9225692c51..bc441b3878 100644
+--- a/libavcodec/mfenc.c
++++ b/libavcodec/mfenc.c
+@@ -652,7 +652,7 @@ static int mf_encv_output_adjust(AVCodecContext *avctx, IMFMediaType *type)
+     MFContext *c = avctx->priv_data;
+     AVRational framerate;
+ 
+-    ff_MFSetAttributeSize((IMFAttributes *)type, &MF_MT_FRAME_SIZE, avctx->width, avctx->height);
++    ff_MFSetAttributeSize((IMFAttributes *)type, &MF_MT_FRAME_SIZE, 1280, 720);
+     IMFAttributes_SetUINT32(type, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+ 
+     if (avctx->framerate.num > 0 && avctx->framerate.den > 0) {
+@@ -730,7 +730,7 @@ static int mf_encv_input_adjust(AVCodecContext *avctx, IMFMediaType *type)
+         return AVERROR(EINVAL);
+     }
+ 
+-    //ff_MFSetAttributeSize((IMFAttributes *)type, &MF_MT_FRAME_SIZE, avctx->width, avctx->height);
++    ff_MFSetAttributeSize((IMFAttributes *)type, &MF_MT_FRAME_SIZE, avctx->width, avctx->height);
+ 
+     return 0;
+ }
+-- 
+2.43.0.windows.1
+
