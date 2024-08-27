@@ -1,0 +1,56 @@
+From 4c3f11a48a27682f885bcd6ca649ab978cf0ad20 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <santdas36@gmail.com>
+Date: Tue, 27 Aug 2024 15:28:41 +0530
+Subject: [PATCH] add enc speed
+
+---
+ libavcodec/mf_utils.h | 2 ++
+ libavcodec/mfenc.c    | 5 +++++
+ 2 files changed, 7 insertions(+)
+
+diff --git a/libavcodec/mf_utils.h b/libavcodec/mf_utils.h
+index aebfb9ad21..e9547f0320 100644
+--- a/libavcodec/mf_utils.h
++++ b/libavcodec/mf_utils.h
+@@ -92,6 +92,8 @@ DEFINE_GUID(ff_CODECAPI_AVDecDisableVideoPostProcessing, 0xf8749193,0x667a,0x4f2
+ // These are missing from mingw-w64's headers until after mingw-w64 v7.0.0.
+ DEFINE_GUID(ff_CODECAPI_AVEncCommonRateControlMode,      0x1c0608e9, 0x370c, 0x4710, 0x8a, 0x58, 0xcb, 0x61, 0x81, 0xc4, 0x24, 0x23);
+ DEFINE_GUID(ff_CODECAPI_AVEncCommonQuality,       0xfcbf57a3, 0x7ea5, 0x4b0c, 0x96, 0x44, 0x69, 0xb4, 0x0c, 0x39, 0xc3, 0x91);
++DEFINE_GUID(ff_CODECAPI_AVEncCommonQualityVsSpeed, 0x98332df8, 0x03cd, 0x476b, 0x89, 0xfa, 
++0x3f, 0x9e, 0x44, 0x2d, 0xec, 0x9f);
+ DEFINE_GUID(ff_CODECAPI_AVEncCommonMeanBitRate,   0xf7222374, 0x2144, 0x4815, 0xb5, 0x50, 0xa3, 0x7f, 0x8e, 0x12, 0xee, 0x52);
+ DEFINE_GUID(ff_CODECAPI_AVEncH264CABACEnable,    0xee6cad62, 0xd305, 0x4248, 0xa5, 0xe, 0xe1, 0xb2, 0x55, 0xf7, 0xca, 0xf8);
+ DEFINE_GUID(ff_CODECAPI_AVEncVideoForceKeyFrame, 0x398c1b98, 0x8353, 0x475a, 0x9e, 0xf2, 0x8f, 0x26, 0x5d, 0x26, 0x3, 0x45);
+diff --git a/libavcodec/mfenc.c b/libavcodec/mfenc.c
+index bc441b3878..da02432a5c 100644
+--- a/libavcodec/mfenc.c
++++ b/libavcodec/mfenc.c
+@@ -54,6 +54,7 @@ typedef struct MFContext {
+     int opt_enc_quality;
+     int opt_enc_scenario;
+     int opt_enc_hw;
++    int opt_enc_speed_quality;
+ } MFContext;
+ 
+ static int mf_choose_output_type(AVCodecContext *avctx);
+@@ -694,6 +695,9 @@ FF_ENABLE_DEPRECATION_WARNINGS
+ 
+         if (c->opt_enc_quality >= 0)
+             ICodecAPI_SetValue(c->codec_api, &ff_CODECAPI_AVEncCommonQuality, FF_VAL_VT_UI4(c->opt_enc_quality));
++        
++        if (c->opt_enc_speed_quality >= 0)
++            ICodecAPI_SetValue(c->codec_api, &ff_CODECAPI_AVEncCommonQualityVsSpeed, FF_VAL_VT_UI4(c->opt_enc_speed_quality));
+ 
+         // Always set the number of b-frames. Qualcomm's HEVC encoder on SD835
+         // defaults this to 1, and that setting is buggy with many of the
+@@ -1279,6 +1283,7 @@ static const AVOption venc_opts[] = {
+     { "display_remoting_with_feature_map", "Display remoting with feature map", 0, AV_OPT_TYPE_CONST, {.i64 = ff_eAVScenarioInfo_DisplayRemotingWithFeatureMap}, 0, 0, VE, .unit = "scenario"},
+ 
+     {"quality",       "Quality", OFFSET(opt_enc_quality), AV_OPT_TYPE_INT, {.i64 = -1}, -1, 100, VE},
++    {"quality_speed",       "Quality vs Speed", OFFSET(opt_enc_speed_quality), AV_OPT_TYPE_INT, {.i64 = -1}, -1, 100, VE},
+     {"hw_encoding",   "Force hardware encoding", OFFSET(opt_enc_hw), AV_OPT_TYPE_BOOL, {.i64 = 0}, 0, 1, VE},
+     {NULL}
+ };
+-- 
+2.43.0.windows.1
+
