@@ -1,5 +1,14 @@
+From 6c0aaa38cf4614e2f8a4d299629c133e8a862443 Mon Sep 17 00:00:00 2001
+From: Damiano Galassi <damiog@gmail.com>
+Date: Thu, 22 Aug 2024 07:40:48 +0200
+Subject: [PATCH 1/5] Do not set thread priority on Windows
+
+---
+ source/common/threadpool.cpp | 6 ------
+ 1 file changed, 6 deletions(-)
+
 diff --git a/source/common/threadpool.cpp b/source/common/threadpool.cpp
-index 2db7a146b..4ed534d6b 100644
+index 91e82a24e..d72df6d47 100644
 --- a/source/common/threadpool.cpp
 +++ b/source/common/threadpool.cpp
 @@ -115,12 +115,6 @@ void WorkerThread::threadMain()
@@ -15,4 +24,6 @@ index 2db7a146b..4ed534d6b 100644
      m_pool.setCurrentThreadAffinity();
  
      sleepbitmap_t idBit = (sleepbitmap_t)1 << m_id;
+--
+2.39.3 (Apple Git-145)
 

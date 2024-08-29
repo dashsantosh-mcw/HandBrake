@@ -2,9 +2,9 @@ __deps__ := X265_8
 $(eval $(call import.MODULE.defs,X265_10,x265_10,$(__deps__),x265))
 $(eval $(call import.CONTRIB.defs,X265_10))
 
-X265_10.FETCH.url     = https://github.com/HandBrake/HandBrake-contribs/releases/download/contribs/x265_3.6.tar.gz
-X265_10.FETCH.url    += https://bitbucket.org/multicoreware/x265_git/downloads/x265_3.6.tar.gz
-X265_10.FETCH.sha256  = 663531f341c5389f460d730e62e10a4fcca3428ca2ca109693867bc5fe2e2807
+X265_10.FETCH.url     = https://github.com/HandBrake/HandBrake-contribs/releases/download/contribs2/x265-snapshot-neon-20240829.tar.gz
+#X265_10.FETCH.url    += https://bitbucket.org/multicoreware/x265_git/downloads/x265_3.6.tar.gz
+X265_10.FETCH.sha256  = 7f0e685ef93d7f37a76e59299ed29d81bd4c8dba98e9ab052f7d8d06e815d114
 
 # Silence "warning: overriding recipe for target" messages
 X265_10.FETCH.target =
@@ -56,6 +56,9 @@ ifeq (1,$(HOST.cross))
         X265_10.CONFIGURE.extra += -DCMAKE_CXX_COMPILER=$(X265_10.GCC.gxx)
         X265_10.CONFIGURE.extra += -DCMAKE_RC_COMPILER=$(HOST.cross.prefix)windres
         X265_10.CONFIGURE.args.host  = -DCMAKE_HOST_SYSTEM="$(X265_10.CONFIGURE.host)"
+    endif
+    ifeq (aarch64,$(HOST.machine:arm64=aarch64))
+        X265_10.CONFIGURE.extra += -DCROSS_COMPILE_ARM64=1 -DCROSS_COMPILE_NEON_DOTPROD=ON
     endif
     X265_10.CONFIGURE.args.build = -DCMAKE_SYSTEM_PROCESSOR=$(HOST.machine)
 endif
