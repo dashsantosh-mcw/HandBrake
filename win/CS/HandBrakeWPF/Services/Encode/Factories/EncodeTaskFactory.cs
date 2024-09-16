@@ -24,6 +24,7 @@ namespace HandBrakeWPF.Services.Encode.Factories
 
     using HandBrakeWPF.Model.Filters;
     using HandBrakeWPF.Services.Interfaces;
+    using HandBrakeWPF.Utilities;
 
     using AudioEncoderRateType = Model.Models.AudioEncoderRateType;
     using AudioTrack = Model.Models.AudioTrack;
@@ -106,6 +107,11 @@ namespace HandBrakeWPF.Services.Encode.Factories
             if (nvdec)
             {
                 hwDecode = (int)NativeConstants.HB_DECODE_SUPPORT_NVDEC;
+            }
+
+            if (directx && HandBrakeHardwareEncoderHelper.IsDirectXAvailable)
+            {
+                hwDecode = (int)NativeConstants.HB_DECODE_SUPPORT_MF;
             }
             if (directx)
             {
@@ -266,7 +272,6 @@ namespace HandBrakeWPF.Services.Encode.Factories
             video.Turbo = job.TurboAnalysisPass;
             video.Options = job.ExtraAdvancedArguments;
 
-            bool enableQuickSyncEncoding = userSettingService.GetUserSetting<bool>(UserSettingConstants.EnableQuickSyncEncoding);
             bool enableQuickSyncDecoding = userSettingService.GetUserSetting<bool>(UserSettingConstants.EnableQuickSyncDecoding);
             bool useQSVDecodeForNonQSVEnc = userSettingService.GetUserSetting<bool>(UserSettingConstants.UseQSVDecodeForNonQSVEnc);
             bool enableQsvLowPower = userSettingService.GetUserSetting<bool>(UserSettingConstants.EnableQuickSyncLowPower);
@@ -277,7 +282,7 @@ namespace HandBrakeWPF.Services.Encode.Factories
             }
 
             // Allow use of the QSV decoder is configurable for non QSV encoders.
-            if (this.isEncodePath &&  job.VideoEncoder != null && !job.VideoEncoder.IsHardwareEncoder && useQSVDecodeForNonQSVEnc && enableQuickSyncDecoding && enableQuickSyncEncoding)
+            if (this.isEncodePath &&  job.VideoEncoder != null && !job.VideoEncoder.IsHardwareEncoder && useQSVDecodeForNonQSVEnc && enableQuickSyncDecoding)
             {
                 video.QSV.Decode = HandBrakeHardwareEncoderHelper.IsQsvAvailable && useQSVDecodeForNonQSVEnc;
             }

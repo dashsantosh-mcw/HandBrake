@@ -63,7 +63,6 @@ namespace HandBrakeWPF
         public const string WhenDoneAudioFile = "WhenDoneAudioFile";
         public const string ProcessIsolationEnabled = "ProcessIsolationEnabled";
         public const string ProcessIsolationPort = "ProcessIsolationPort";
-        public const string EnableQuickSyncEncoding = "EnableQuickSyncEncoding";
         public const string EnableQuickSyncHyperEncode = "EnableQuickSyncHyperEncode";
         public const string EnableVceEncoder = "EnableVceEncoder";
         public const string EnableDirectXDecoding = "EnableDirectXDecoding";

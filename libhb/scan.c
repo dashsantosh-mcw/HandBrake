@@ -678,14 +678,18 @@ static int DecodePreviews( hb_scan_t * data, hb_title_t * title, int flush )
         title->angle_count = hb_dvd_angle_count( data->dvd );
         hb_log( "scan: title angle(s) %d", title->angle_count );
     }
-    else if (data->batch)
+    else // data->batch or a single file
     {
         stream = hb_stream_open(data->h, title->path, title, 0);
     }
-    else 
+
+    if (data->bd == NULL && data->dvd == NULL && stream == NULL)
     {
-        // We have a batch of files.
-        stream = hb_stream_open(data->h, title->path, title, 0);
+        hb_error("Can't open stream!");
+        free(info_list);
+        crop_record_free(crops);
+        hb_stream_close(&stream);
+        return 0;
     }
 
     if (title->video_codec == WORK_NONE)
@@ -1521,6 +1525,41 @@ static void LookForAudio(hb_scan_t *scan, hb_title_t * title, hb_audio_t * audio
     audio->config.in.flags = info.flags;
     audio->config.in.mode = info.mode;
 
+    // Under some circumstances, ffmpeg fails to probe the DTS profile
+    // during it's initial scan of DTS audio tracks. The profile gets
+    // picked up during our more indepth scan here.
+    if (audio->config.in.codec == HB_ACODEC_FFMPEG)
+    {
+        switch (audio->config.in.codec_param)
+        {
+            case AV_CODEC_ID_DTS:
+            {
+                switch (info.profile)
+                {
+                    case AV_PROFILE_DTS:
+                    case AV_PROFILE_DTS_ES:
+                    case AV_PROFILE_DTS_96_24:
+                    case AV_PROFILE_DTS_EXPRESS:
+                        audio->config.in.codec = HB_ACODEC_DCA;
+                        break;
+
+                    case AV_PROFILE_DTS_HD_MA:
+                    case AV_PROFILE_DTS_HD_HRA:
+                    case AV_PROFILE_DTS_HD_MA_X:
+                    case AV_PROFILE_DTS_HD_MA_X_IMAX:
+                        audio->config.in.codec = HB_ACODEC_DCA_HD;
+                        break;
+
+                    default:
+                        break;
+                }
+            } break;
+
+            default:
+                break;
+        }
+    }
+
     // now that we have all the info, set the audio description
     const char *codec_name   = NULL;
     const char *profile_name = NULL;
@@ -1529,7 +1568,7 @@ static void LookForAudio(hb_scan_t *scan, hb_title_t * title, hb_audio_t * audio
         const AVCodec *codec = avcodec_find_decoder(audio->config.in.codec_param);
         if (codec != NULL)
         {
-            if (info.profile != FF_PROFILE_UNKNOWN)
+            if (info.profile != AV_PROFILE_UNKNOWN)
             {
                 profile_name = av_get_profile_name(codec, info.profile);
             }
