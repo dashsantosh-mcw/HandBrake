@@ -10,6 +10,7 @@
 #include "handbrake/common.h"
 #include "handbrake/hbavfilter.h"
 #include "handbrake/avfilter_priv.h"
+#include <sys/time.h>
 
 #if HB_PROJECT_FEATURE_QSV && (defined( _WIN32 ) || defined( __MINGW32__ ))
 #include "handbrake/qsv_common.h"
@@ -283,12 +284,43 @@ static hb_buffer_t* filterFrame( hb_filter_private_t * pv, hb_buffer_t ** buf_in
     return hb_buffer_list_head(&list);
 }
 
+
+void log_elapsed_timefilter(const char* label, int frame_sequence, struct timeval start) {
+        struct timeval end;
+    gettimeofday(&end, NULL);  
+    long seconds = end.tv_sec - start.tv_sec;
+    long useconds = end.tv_usec - start.tv_usec;
+    double elapsedTime = seconds + useconds / 1e6;
+    hb_log("%s elapsed frame %d: %.6f seconds", label, frame_sequence, elapsedTime);
+}
+
+static int f_in_x264 = 1;
+
+static struct timeval start_t_filterFrame[7];
+static int f_in = 1;
 static int avfilter_work( hb_filter_object_t * filter,
                           hb_buffer_t ** buf_in, hb_buffer_t ** buf_out )
 {
     hb_filter_private_t * pv = filter->private_data;
     hb_buffer_t * in = *buf_in;
-
+    if (!in->frame_no) {
+        in->frame_no = f_in++;
+    }
+    if (in->frame_no!=0 && (in->frame_no==1 || in->frame_no==5 || (in->frame_no) % 356 == 0))
+    {
+        if (in->frame_no==1)
+        {
+            gettimeofday(&start_t_filterFrame[0], NULL);
+        }
+        else if (in->frame_no==5)
+        {
+            gettimeofday(&start_t_filterFrame[1], NULL);
+        }
+        else 
+        {
+        gettimeofday(&start_t_filterFrame[(int)((in->frame_no) / 356) + 1], NULL);
+        }
+    }
     if (in->s.flags & HB_BUF_FLAG_EOF)
     {
         hb_buffer_t * out  = filterFrame(pv, NULL);
@@ -305,6 +337,20 @@ static int avfilter_work( hb_filter_object_t * filter,
     }
 
     *buf_out = filterFrame(pv, buf_in);
-
+    if (in->frame_no!=0 && (in->frame_no==1 || in->frame_no==5 || in->frame_no % 356 == 0))
+    {
+        if (in->frame_no==1)
+        {
+            log_elapsed_timefilter("filterFrame", in->frame_no, start_t_filterFrame[0]);
+        }
+        else if (in->frame_no==5)
+        {
+            log_elapsed_timefilter("filterFrame", in->frame_no, start_t_filterFrame[1]);
+        }
+        else
+        {
+            log_elapsed_timefilter("filterFrame", in->frame_no, start_t_filterFrame[(int)(in->frame_no / 356) +1]);
+        }
+    }
     return HB_FILTER_OK;
 }

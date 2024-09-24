@@ -18,7 +18,7 @@
 #include "handbrake/dovi_common.h"
 #include "handbrake/hdr10plus.h"
 #include "handbrake/extradata.h"
-
+#include <sys/time.h>
 #include "x265.h"
 
 int  encx265Init (hb_work_object_t*, hb_job_t*);
@@ -683,6 +683,16 @@ static hb_buffer_t* nal_encode(hb_work_object_t *w,
     return buf;
 }
 
+void log_elapsed_timex265(const char* label, int frame_sequence, struct timeval start) {
+        struct timeval end;
+    gettimeofday(&end, NULL);  
+    long seconds = end.tv_sec - start.tv_sec;
+    long useconds = end.tv_usec - start.tv_usec;
+    double elapsedTime = seconds + useconds / 1e6;
+    hb_log("%s elapsed frame %d: %.6f seconds", label, frame_sequence, elapsedTime);
+}
+
+static struct timeval start_t_encodeFrame[7];
 static hb_buffer_t* x265_encode(hb_work_object_t *w, hb_buffer_t *in)
 {
     hb_work_private_t *pv = w->private_data;
@@ -806,6 +816,19 @@ int encx265Work(hb_work_object_t *w, hb_buffer_t **buf_in, hb_buffer_t **buf_out
     hb_work_private_t *pv = w->private_data;
     hb_buffer_t       *in = *buf_in;
 
+    if (pv->frames_in ==0 || pv->frames_in ==4 ||((pv->frames_in+1) % 356) == 0)
+    {
+        if (pv->frames_in==0)
+        {
+            gettimeofday(&start_t_encodeFrame[0], NULL);
+        }
+        else if (pv->frames_in==4)
+        {
+            gettimeofday(&start_t_encodeFrame[1], NULL);
+        }else{
+        gettimeofday(&start_t_encodeFrame[(int)((pv->frames_in+1) / 356) + 1], NULL);
+        }
+    }
     if (in->s.flags & HB_BUF_FLAG_EOF)
     {
         uint32_t nnal;
@@ -837,6 +860,21 @@ int encx265Work(hb_work_object_t *w, hb_buffer_t **buf_in, hb_buffer_t **buf_out
     }
 
     *buf_out = x265_encode(w, in);
+    if (pv->frames_in!=0 && (pv->frames_in ==1 || pv->frames_in ==5 || (pv->frames_in % 356 == 0)))
+    {
+        if (pv->frames_in==1)
+        {
+            log_elapsed_timex265("encodeFrame", pv->frames_in, start_t_encodeFrame[0]);
+        }
+        else if (pv->frames_in==5)
+        {
+            log_elapsed_timex265("encodeFrame", pv->frames_in, start_t_encodeFrame[1]);
+        }
+        else
+        {
+        log_elapsed_timex265("encodeFrame", pv->frames_in, start_t_encodeFrame[(int)(pv->frames_in / 356) + 1]);
+        }
+    }
     return HB_WORK_OK;
 }
 

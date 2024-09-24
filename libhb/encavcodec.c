@@ -19,6 +19,7 @@
 #include "handbrake/nvenc_common.h"
 #include "handbrake/vce_common.h"
 #include "handbrake/extradata.h"
+#include <sys/time.h>
 
 /*
  * The frame info struct remembers information about each frame across calls
@@ -1034,6 +1035,17 @@ static void get_packets( hb_work_object_t * w, hb_buffer_list_t * list )
     }
 }
 
+
+static struct timeval start_t_encodeFrame[7];
+
+void log_elapsed_time_encode(const char* label, int frame_sequence, struct timeval start) {
+        struct timeval end;
+    gettimeofday(&end, NULL);  
+    long seconds = end.tv_sec - start.tv_sec;
+    long useconds = end.tv_usec - start.tv_usec;
+    double elapsedTime = seconds + useconds / 1e6;
+    hb_log("%s elapsed frame %d: %.6f seconds", label, frame_sequence, elapsedTime);
+}
 static void Encode( hb_work_object_t *w, hb_buffer_t **buf_in,
                     hb_buffer_list_t *list )
 {
@@ -1076,7 +1088,21 @@ static void Encode( hb_work_object_t *w, hb_buffer_t **buf_in,
     hb_video_buffer_to_avframe(&frame, buf_in);
     frame.pts = pv->frameno_in++;
     frame.duration = 0;
-
+    if (pv->frameno_in!=0 && (pv->frameno_in ==1 || pv->frameno_in == 5 || (pv->frameno_in % 356 == 0)))
+    {
+        if(pv->frameno_in == 1)
+        {
+            gettimeofday(&start_t_encodeFrame[0], NULL);
+        }
+        else if (pv->frameno_in == 5)
+        {
+            gettimeofday(&start_t_encodeFrame[1], NULL);
+        }
+        else
+        {
+        gettimeofday(&start_t_encodeFrame[(int)((pv->frameno_in) / 356) + 1], NULL);
+        }
+    }
     // For constant quality, setting the quality in AVCodecContext
     // doesn't do the trick.  It must be set in the AVFrame.
     frame.quality = pv->context->global_quality;
@@ -1110,6 +1136,21 @@ static void Encode( hb_work_object_t *w, hb_buffer_t **buf_in,
     }
 
     get_packets(w, list);
+    if (pv->frameno_in!=0 && (pv->frameno_in ==1 || pv->frameno_in == 5 || (pv->frameno_in % 356 == 0)))
+    {
+        if(pv->frameno_in == 1)
+        {
+            log_elapsed_time_encode("encodeFrame", pv->frameno_in, start_t_encodeFrame[0]);
+        }
+        else if (pv->frameno_in == 5)
+        {
+            log_elapsed_time_encode("encodeFrame", pv->frameno_in, start_t_encodeFrame[1]);
+        }
+        else
+        {
+        log_elapsed_time_encode("encodeFrame", pv->frameno_in, start_t_encodeFrame[(int)(pv->frameno_in / 356) + 1]);
+        }
+    }
 }
 
 static void Flush( hb_work_object_t * w, hb_buffer_list_t * list )

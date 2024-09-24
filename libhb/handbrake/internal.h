@@ -138,7 +138,7 @@ struct hb_buffer_s
     int           alloc;    // used internally by the packet allocator (hb_buffer_init)
     uint8_t *     data;     // packet data
     int           offset;   // used internally by packet lists (hb_list_t)
-
+    int           frame_no; // frame number
     hb_buffer_settings_t s;
     hb_image_format_t f;
 

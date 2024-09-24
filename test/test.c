@@ -1027,15 +1027,15 @@ static int HandleEvents(hb_handle_t * h, hb_dict_t *preset_dict)
                 show_progress_json(&s);
                 break;
             }
-            fprintf( stdout, "%sEncoding: task %d of %d, %.2f %%",
-                     stdout_sep, p.pass, p.pass_count, 100.0 * p.progress );
-            if( p.seconds > -1 )
-            {
-                fprintf( stdout, " (%.2f fps, avg %.2f fps, ETA "
-                         "%02dh%02dm%02ds)", p.rate_cur, p.rate_avg,
-                         p.hours, p.minutes, p.seconds );
-            }
-            fflush(stdout);
+            // fprintf( stdout, "%sEncoding: task %d of %d, %.2f %%",
+                    //  stdout_sep, p.pass, p.pass_count, 100.0 * p.progress );
+            // if( p.seconds > -1 )
+            // {
+                // fprintf( stdout, " (%.2f fps, avg %.2f fps, ETA "
+                        //  "%02dh%02dm%02ds)", p.rate_cur, p.rate_avg,
+                        //  p.hours, p.minutes, p.seconds );
+            // }
+            // fflush(stdout);
             break;
 #undef p
 

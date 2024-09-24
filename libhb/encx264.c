@@ -13,6 +13,7 @@
 #include "handbrake/hb_dict.h"
 #include "handbrake/encx264.h"
 #include "handbrake/extradata.h"
+#include <sys/time.h>
 
 int  encx264Init( hb_work_object_t *, hb_job_t * );
 int  encx264Work( hb_work_object_t *, hb_buffer_t **, hb_buffer_t ** );
@@ -927,14 +928,42 @@ static hb_buffer_t *x264_encode( hb_work_object_t *w, hb_buffer_t *in )
     return NULL;
 }
 
+void log_elapsed_timex264(const char* label, int frame_sequence, struct timeval start) {
+        struct timeval end;
+    gettimeofday(&end, NULL);  
+    long seconds = end.tv_sec - start.tv_sec;
+    long useconds = end.tv_usec - start.tv_usec;
+    double elapsedTime = seconds + useconds / 1e6;
+    hb_log("%s elapsed frame %d: %.6f seconds", label, frame_sequence, elapsedTime);
+}
+
+static int f_in_x264 = 1;
+
+static struct timeval start_t_encodeFrame[7];
 int encx264Work( hb_work_object_t * w, hb_buffer_t ** buf_in,
                   hb_buffer_t ** buf_out )
 {
     hb_work_private_t *pv = w->private_data;
     hb_buffer_t *in = *buf_in;
-
+    if (!in->frame_no) {
+        in->frame_no = f_in_x264++;
+    }
     *buf_out = NULL;
-
+    if (in->frame_no!=0 && (in->frame_no==1 || in->frame_no==5 || (in->frame_no) % 356 == 0))
+    {
+        if (in->frame_no==1)
+        {
+            gettimeofday(&start_t_encodeFrame[0], NULL);
+        }
+        else if (in->frame_no==5)
+        {
+            gettimeofday(&start_t_encodeFrame[1], NULL);
+        }
+        else 
+        {
+        gettimeofday(&start_t_encodeFrame[(int)((in->frame_no) / 356) +1], NULL);
+        }
+    }
     if (in->s.flags & HB_BUF_FLAG_EOF)
     {
         // EOF on input. Flush any frames still in the decoder then
@@ -968,6 +997,21 @@ int encx264Work( hb_work_object_t * w, hb_buffer_t ** buf_in,
 
     // Not EOF - encode the packet & wrap it in a NAL
     *buf_out = x264_encode( w, in );
+     if (in->frame_no!=0 && (in->frame_no==1 || in->frame_no==5 || in->frame_no % 356 == 0))
+    {
+        if (in->frame_no==1)
+        {
+            log_elapsed_timex264("encodeFrame", in->frame_no, start_t_encodeFrame[0]);
+        }
+        else if (in->frame_no==5)
+        {
+            log_elapsed_timex264("encodeFrame", in->frame_no, start_t_encodeFrame[1]);
+        }
+        else{
+
+        log_elapsed_timex264("encodeFrame", in->frame_no, start_t_encodeFrame[(int)(in->frame_no / 356) +1]);
+        }
+    }
     return HB_WORK_OK;
 }
 

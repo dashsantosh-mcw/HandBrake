@@ -51,12 +51,24 @@
 #include "handbrake/lang.h"
 #include "handbrake/audio_resample.h"
 #include "handbrake/extradata.h"
-
+#include <sys/time.h> 
 #if HB_PROJECT_FEATURE_QSV
 #include "libavutil/hwcontext_qsv.h"
 #include "handbrake/qsv_common.h"
 #include "handbrake/qsv_libav.h"
 #endif
+
+static struct timeval start_t_sendFrame[7];
+static struct timeval start_t_receiveFrame[7];
+
+void log_elapsed_time(const char* label, int frame_sequence, struct timeval start) {
+        struct timeval end;
+    gettimeofday(&end, NULL);  
+    long seconds = end.tv_sec - start.tv_sec;
+    long useconds = end.tv_usec - start.tv_usec;
+    double elapsedTime = seconds + useconds / 1e6;
+    hb_log("%s elapsed frame %d: %.6f seconds", label, frame_sequence, elapsedTime);
+}
 
 static void compute_frame_duration( hb_work_private_t *pv );
 static int  decavcodecaInit( hb_work_object_t *, hb_job_t * );
@@ -1682,7 +1694,20 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     AVPacket *avp = pv->pkt;
     reordered_data_t * reordered;
     AVFrame *recv_frame = pv->frame;
-
+    if ((pv->sequence ==0 || pv->sequence ==4 ||(pv->sequence+1) % 356 == 0))
+    {
+        if(pv->sequence ==0){
+            gettimeofday(&start_t_sendFrame[0], NULL);
+        }
+        else if (pv->sequence ==4)
+        {
+            gettimeofday(&start_t_sendFrame[1], NULL);
+        }
+        else
+        {
+        gettimeofday(&start_t_sendFrame[(int)((pv->sequence + 1) / 356) +1], NULL);
+        }
+    }
     if (pv->hw_frame)
     {
         recv_frame = pv->hw_frame;
@@ -1743,7 +1768,23 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
         ++pv->decode_errors;
         return 0;
     }
-
+    if (pv->sequence!=0 && (pv->sequence ==1 || pv->sequence ==5 || pv->sequence % 356 == 0))
+    {
+        if(pv->sequence == 1)
+        {
+            log_elapsed_time("sendFrame", pv->sequence, start_t_sendFrame[0]);
+            gettimeofday(&start_t_receiveFrame[0], NULL);
+        }
+        else if (pv->sequence == 5)
+        {
+            log_elapsed_time("sendFrame", pv->sequence, start_t_sendFrame[1]);
+            gettimeofday(&start_t_receiveFrame[1], NULL);
+        }
+        else {
+        log_elapsed_time("sendFrame", pv->sequence, start_t_sendFrame[(int)(pv->sequence / 356) + 1]);
+        gettimeofday(&start_t_receiveFrame[(int)(pv->sequence / 356) +1], NULL);
+        }
+    }
     do
     {
         ret = avcodec_receive_frame(pv->context, recv_frame);
@@ -1787,6 +1828,20 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
         filter_video(pv);
     } while (ret >= 0);
 
+    if (pv->sequence!=0 && (pv->sequence ==1 || pv->sequence ==5 || pv->sequence % 356 == 0))
+    {
+        if(pv->sequence == 1)
+        {
+            log_elapsed_time("receiveFrame", pv->sequence, start_t_receiveFrame[0]);
+        }
+        else if(pv->sequence == 5)
+        {
+            log_elapsed_time("receiveFrame", pv->sequence, start_t_receiveFrame[1]);
+        }
+        else{
+        log_elapsed_time("receiveFrame", pv->sequence, start_t_receiveFrame[(int)(pv->sequence / 356) + 1]);
+        }
+    }
     if ( global_verbosity_level <= 1 )
     {
         av_log_set_level( oldlevel );
@@ -2207,6 +2262,7 @@ static void videoParserFlush(hb_work_object_t * w)
     } while (pout != NULL && pout_len > 0);
 }
 
+
 static int decavcodecvWork( hb_work_object_t * w, hb_buffer_t ** buf_in,
                             hb_buffer_t ** buf_out )
 {
@@ -2215,7 +2271,7 @@ static int decavcodecvWork( hb_work_object_t * w, hb_buffer_t ** buf_in,
     int                 result = HB_WORK_OK;
 
     *buf_out = NULL;
-
+    
     // libavcodec/mpeg12dec.c requires buffers to be zero padded.
     // If not zero padded, it can get stuck in an infinite loop.
     // It's likely there are other decoders that expect the same.
