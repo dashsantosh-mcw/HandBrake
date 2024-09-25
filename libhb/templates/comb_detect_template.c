@@ -15,7 +15,7 @@
 #   define FUNC(name) name##_##8
 #endif
 
-#if defined(__aarch64__) && defined(_WIN32)
+#if defined(__aarch64__)
     #include <arm_neon.h>
 #endif
 static inline void FUNC(draw_mask_box)(hb_filter_private_t *pv)
@@ -134,7 +134,7 @@ static void FUNC(apply_mask)(hb_filter_private_t *pv, hb_buffer_t *b)
     }
 }
 
-#if defined(__aarch64__) && defined(_WIN32)
+#if defined(__aarch64__)
 static void FUNC(detect_gamma_combed_segment)(hb_filter_private_t *pv,
                                               int segment_start, int segment_stop)
 {
@@ -402,7 +402,7 @@ static void FUNC(detect_gamma_combed_segment)(hb_filter_private_t *pv,
 }
 #endif
 
-#if defined(__aarch64__) && defined(_WIN32)
+#if defined(__aarch64__)
 #if BIT_DEPTH > 8
 static void FUNC(detect_combed_segment)(hb_filter_private_t *pv,
                                         int segment_start, int segment_stop)

@@ -15,7 +15,7 @@
 #   define FUNC(name) name##_##8
 #endif
 
-#if defined(__aarch64__) && defined(_WIN32)
+#if defined(__aarch64__)
     #include <arm_neon.h>
 #endif
 #include "handbrake/eedi2.h"
@@ -106,7 +106,7 @@ static inline void FUNC(cubic_interpolate_line)(pixel *dst,
     }
 }
 
-#if defined(__aarch64__) && defined(_WIN32)
+#if defined(__aarch64__)
 #if BIT_DEPTH > 8
 static void FUNC(blend_filter_line)(const filter_param_t *filter,
                                     const pixel *crop_table,

@@ -52,7 +52,8 @@ static void build_gamma_lut(hb_motion_metric_private_t *pv)
 // Compute the sum of squared errors for a 16x16 block
 // Gamma adjusts pixel values so that less visible differences
 // count less.
-#if HB_PROJECT_FEATURE_MF
+#if defined(__aarch64__)
+
 static
 float motion_metric_neon_8(hb_motion_metric_private_t *pv,
                                      hb_buffer_t *a, hb_buffer_t *b)
@@ -134,7 +135,7 @@ static inline unsigned sse_block16##_##nbits(unsigned *gamma_lut,               
     return sum;                                                                        \
 }                                                                                      \
 
-#if !HB_PROJECT_FEATURE_MF
+#if !defined(__aarch64__)
 DEF_SSE_BLOCK16(8)
 #endif
 
@@ -167,7 +168,7 @@ static float motion_metric##_##nbits(hb_motion_metric_private_t *pv,         \
     return (float)sum / (a->f.width * a->f.height);                          \
 }                                                                            \
 
-#if !HB_PROJECT_FEATURE_MF
+#if !defined(__aarch64__)
 DEF_MOTION_METRIC(8)
 #endif
 
@@ -209,7 +210,8 @@ static float hb_motion_metric_work(hb_motion_metric_object_t *metric,
     switch (pv->depth)
     {
         case 8:
-#if HB_PROJECT_FEATURE_MF
+#if defined(__aarch64__)
+
             return motion_metric_neon_8(metric->private_data, buf_a, buf_b);
 #else
             return motion_metric_8(metric->private_data, buf_a, buf_b);
