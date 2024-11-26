@@ -124,6 +124,7 @@ hb_avfilter_graph_init(hb_value_t * settings, hb_filter_init_t * init)
 #endif
     {
         enum AVPixelFormat pix_fmt = init->pix_fmt;
+        hb_log("filter inti pix_fmt: %s", av_get_pix_fmt_name(init->hw_pix_fmt));
         if (init->hw_pix_fmt == AV_PIX_FMT_CUDA)
         {
             par = av_buffersrc_parameters_alloc();
@@ -148,6 +149,10 @@ hb_avfilter_graph_init(hb_value_t * settings, hb_filter_init_t * init)
 
             pix_fmt = init->hw_pix_fmt;
         }
+        if(init->hw_pix_fmt == AV_PIX_FMT_D3D11)
+        {
+            pix_fmt = init->hw_pix_fmt;
+        }
         filter_args = hb_strdup_printf(
                     "width=%d:height=%d:pix_fmt=%d:sar=%d/%d:"
                     "colorspace=%d:range=%d:"
@@ -158,10 +163,11 @@ hb_avfilter_graph_init(hb_value_t * settings, hb_filter_init_t * init)
                     init->time_base.num, init->time_base.den,
                     init->vrate.num, init->vrate.den);
     }
-
     // buffer video source: the decoded frames from the decoder will be inserted here.
     result = avfilter_graph_create_filter(&graph->input, avfilter_get_by_name("buffer"), "in",
                                           filter_args, NULL, graph->avgraph);
+    hb_log("hb_avfilter_graph_init: filter_args: %s", filter_args);
+
     free(filter_args);
     if (result < 0)
     {

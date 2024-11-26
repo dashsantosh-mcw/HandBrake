@@ -6757,7 +6757,7 @@ static int pix_hw_fmt_is_supported(hb_job_t *job, int pix_fmt)
         }
 #endif
     }
-    else if (hb_hwaccel_is_full_hardware_pipeline_enabled(job))
+    else if (1)
     {
         if (pix_fmt == AV_PIX_FMT_CUDA &&
             job->hw_decode & HB_DECODE_SUPPORT_NVDEC)

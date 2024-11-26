@@ -1394,7 +1394,7 @@ int reinit_video_filters(hb_work_private_t * pv)
     }
     else
     {
-        if (pv->job->hw_pix_fmt == AV_PIX_FMT_VIDEOTOOLBOX)
+        if (1)
         {
             // Filtering is done in a separate filter
             return 0;
@@ -1591,9 +1591,12 @@ int reinit_video_filters(hb_work_private_t * pv)
         frames_ctx = (AVHWFramesContext *)pv->frame->hw_frames_ctx->data;
         sw_pix_fmt = frames_ctx->sw_format;
         hw_pix_fmt = frames_ctx->format;
+        hb_log("hwctx found: hw_frames_ctx sw_pix_fmt=%s hw_pix_fmt=%s", av_get_pix_fmt_name(sw_pix_fmt), av_get_pix_fmt_name(hw_pix_fmt));
     }
 
     memset((void*)&filter_init, 0, sizeof(filter_init));
+    hb_log("reinit_video_filters: creating filter graph");
+    hb_log("reinit_video_filters: sw_pix_fmt=%s hw_pix_fmt=%s", av_get_pix_fmt_name(sw_pix_fmt), av_get_pix_fmt_name(hw_pix_fmt));
 
     filter_init.job               = pv->job;
     filter_init.pix_fmt           = sw_pix_fmt;
@@ -1709,6 +1712,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 
     if (pv->hw_frame)
     {
+        hb_log("decodeFrame: hw_frame=%p", pv->hw_frame);
         recv_frame = pv->hw_frame;
     }
 
@@ -1786,6 +1790,14 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
             if (pv->hw_frame->hw_frames_ctx)
             {
                 ret = av_hwframe_transfer_data(pv->frame, pv->hw_frame, 0);
+
+
+                // pv->frame->data[0] = pv->hw_frame->data[0];
+                // pv->frame->data[1] = pv->hw_frame->data[1];
+                // pv->frame->format = pv->hw_frame->format;
+                // pv->frame->width  = pv->hw_frame->width;
+                // pv->frame->height = pv->hw_frame->height;
+                // pv->frame->hw_frames_ctx = av_buffer_ref(pv->hw_frame->hw_frames_ctx);
                 av_frame_copy_props(pv->frame, pv->hw_frame);
                 av_frame_unref(pv->hw_frame);
                 if (ret < 0)
@@ -1793,6 +1805,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
                     hb_error("decavcodec: error transferring data to system memory");
                     break;
                 }
+                hb_log("decavcodec: av_hwframe_transfer_data frame->format=%s", av_get_pix_fmt_name(pv->frame->format));
             }
             else
             {

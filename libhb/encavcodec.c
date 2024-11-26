@@ -159,7 +159,7 @@ static const enum AVPixelFormat standard_10bit_pix_fmts[] =
 
 static const enum AVPixelFormat h26x_mf_pix_fmts[] =
 {
-    AV_PIX_FMT_NV12, AV_PIX_FMT_NONE
+    AV_PIX_FMT_D3D11, AV_PIX_FMT_NV12, AV_PIX_FMT_NONE
 };
 
 static const enum AVPixelFormat nvenc_pix_formats_10bit[] =
@@ -618,7 +618,7 @@ int encavcodecInit( hb_work_object_t * w, hb_job_t * job )
     context->width     = job->width;
     context->height    = job->height;
 
-    if (hb_hwaccel_is_full_hardware_pipeline_enabled(pv->job))
+    if (1 /*hb_hwaccel_is_full_hardware_pipeline_enabled(pv->job)*/)
     {
         context->hw_device_ctx = av_buffer_ref(pv->job->hw_device_ctx);
         hb_hwaccel_hwframes_ctx_init(context, job);
@@ -626,7 +626,7 @@ int encavcodecInit( hb_work_object_t * w, hb_job_t * job )
     }
     else
     {
-        context->pix_fmt = job->output_pix_fmt;
+        context->pix_fmt = AV_PIX_FMT_D3D11;
     }
 
     context->sample_aspect_ratio.num = job->par.num;
