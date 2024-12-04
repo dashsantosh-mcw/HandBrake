@@ -69,7 +69,7 @@ GCC.args.g.max             = -gdwarf-2 -g3
 GCC.args.O.none            = -O0
 GCC.args.O.size            = -Os
 GCC.args.O.size-aggressive = -Oz
-GCC.args.O.speed           = -O3
+GCC.args.O.speed           = -O3 -ffast-math
 GCC.args.cpu.none          =
 GCC.args.cpu.native        =
 ifeq ($(HOST.machine),$(filter $(HOST.machine),i686 x86_64))
@@ -94,7 +94,7 @@ GCC.args.extra         =
 ifeq ($(HOST.machine),$(filter $(HOST.machine),i686 x86_64))
     GCC.args.extra    += -mfpmath=sse -msse2
 endif
-GCC.args.extra        += $(CPPFLAGS) $(CFLAGS)
+GCC.args.extra        += $(CPPFLAGS) $(CFLAGS) -funroll-loops
 GCC.args.extra.h_o     =
 GCC.args.extra.c_o     =
 GCC.args.extra.dylib   = $(LDFLAGS)
