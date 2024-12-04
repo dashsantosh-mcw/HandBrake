@@ -1,0 +1,1675 @@
+From fbdbf66143eb90f4fc66f89870ffee5b89d2eb31 Mon Sep 17 00:00:00 2001
+From: hguermaz <hassen.guermazi@intel.com>
+Date: Wed, 9 Oct 2024 10:37:44 -0700
+Subject: [PATCH 40/56] Add lossless coding support
+
+---
+ Source/API/EbDebugMacros.h                   |   1 +
+ Source/API/EbSvtAv1Enc.h                     |  15 ++-
+ Source/App/app_config.c                      |  14 +-
+ Source/Lib/ASM_SSE4_1/highbd_fwd_txfm_sse4.c |  80 ++++++++++++
+ Source/Lib/Codec/aom_dsp_rtcd.c              |   3 +
+ Source/Lib/Codec/aom_dsp_rtcd.h              |   5 +
+ Source/Lib/Codec/coding_loop.c               |  63 ++++++++-
+ Source/Lib/Codec/enc_dec_process.c           |   8 +-
+ Source/Lib/Codec/enc_mode_config.c           |  21 ++-
+ Source/Lib/Codec/entropy_coding.c            |  61 ++++++++-
+ Source/Lib/Codec/full_loop.c                 |  57 ++++++++-
+ Source/Lib/Codec/full_loop.h                 |   5 +
+ Source/Lib/Codec/md_config_process.c         |  77 ++++++++++-
+ Source/Lib/Codec/md_process.c                |   8 ++
+ Source/Lib/Codec/mode_decision.c             |  13 ++
+ Source/Lib/Codec/pcs.h                       |   5 +
+ Source/Lib/Codec/product_coding_loop.c       | 127 +++++++++++++++++--
+ Source/Lib/Codec/rd_cost.c                   |  24 ++++
+ Source/Lib/Codec/rd_cost.h                   |   6 +-
+ Source/Lib/Codec/transforms.c                |  79 ++++++++++++
+ Source/Lib/Codec/transforms.h                |  14 +-
+ Source/Lib/Globals/enc_handle.c              |  60 ++++++++-
+ Source/Lib/Globals/enc_settings.c            |  65 ++++++----
+ 23 files changed, 748 insertions(+), 63 deletions(-)
+
+diff --git a/Source/API/EbDebugMacros.h b/Source/API/EbDebugMacros.h
+index 64d38eac..0dadbfab 100644
+--- a/Source/API/EbDebugMacros.h
++++ b/Source/API/EbDebugMacros.h
+@@ -35,6 +35,7 @@ extern "C" {
+ #endif // __cplusplus
+ 
+ #define CLN_LP_LVLS             1 // Change --lp input to represent the levels of parallelization that are actually implemented in the code
++#define FTR_LOSSLESS_SUPPORT    1 // Losless coding support
+ 
+ //FOR DEBUGGING - Do not remove
+ #define OPT_LD_LATENCY2         1 // Latency optimization for low delay - to keep the Macro for backwards testing until 3.0
+diff --git a/Source/API/EbSvtAv1Enc.h b/Source/API/EbSvtAv1Enc.h
+index 69da733b..b89279ba 100644
+--- a/Source/API/EbSvtAv1Enc.h
++++ b/Source/API/EbSvtAv1Enc.h
+@@ -980,13 +980,26 @@ typedef struct EbSvtAv1EncConfiguration {
+      *  Default is 6 */
+     uint8_t variance_octile;
+ 
++#if FTR_LOSSLESS_SUPPORT
++    /* @brief Signal to the library to enable losless coding
++     *
++     * Default is false.
++     */
++    Bool lossless;
++    /*Add 128 Byte Padding to Struct to avoid changing the size of the public configuration struct*/
++#if CLN_LP_LVLS
++    uint8_t padding[128 - 2 * sizeof(Bool) - 2 * sizeof(uint8_t) - sizeof(uint32_t)];
++#else
++    uint8_t padding[128 - 2 * sizeof(Bool) - 2 * sizeof(uint8_t)];
++#endif
++#else
+     /*Add 128 Byte Padding to Struct to avoid changing the size of the public configuration struct*/
+ #if CLN_LP_LVLS
+     uint8_t padding[128 - sizeof(Bool) - 2 * sizeof(uint8_t) - sizeof(uint32_t)];
+ #else
+     uint8_t padding[128 - sizeof(Bool) - 2 * sizeof(uint8_t)];
+ #endif
+-
++#endif
+ } EbSvtAv1EncConfiguration;
+ 
+ /**
+diff --git a/Source/App/app_config.c b/Source/App/app_config.c
+index aae97e3c..015bdd30 100644
+--- a/Source/App/app_config.c
++++ b/Source/App/app_config.c
+@@ -196,7 +196,9 @@
+ #define ENABLE_VARIANCE_BOOST_TOKEN "--enable-variance-boost"
+ #define VARIANCE_BOOST_STRENGTH_TOKEN "--variance-boost-strength"
+ #define VARIANCE_OCTILE_TOKEN "--variance-octile"
+-
++#if FTR_LOSSLESS_SUPPORT
++#define LOSSLESS_TOKEN "--lossless"
++#endif
+ static EbErrorType validate_error(EbErrorType err, const char *token, const char *value) {
+     switch (err) {
+     case EB_ErrorNone: return EB_ErrorNone;
+@@ -1137,8 +1139,10 @@ ConfigEntry config_entry_specific[] = {
+      RESIZE_FRAME_DENOMS,
+      "Resize denominator in event, in a list separated by ',', only applicable for mode == 4",
+      set_cfg_generic_token},
+-    // --- end: REFERENCE SCALING SUPPORT
+-
++// --- end: REFERENCE SCALING SUPPORT
++#if FTR_LOSSLESS_SUPPORT
++    {SINGLE_INPUT, LOSSLESS_TOKEN, "Enable lossless coding, default is 0 [0-1]", set_cfg_generic_token},
++#endif
+     // Termination
+     {SINGLE_INPUT, NULL, NULL, NULL}};
+ 
+@@ -1365,6 +1369,10 @@ ConfigEntry config_entry[] = {
+     {SINGLE_INPUT, VARIANCE_BOOST_STRENGTH_TOKEN, "VarianceBoostStrength", set_cfg_generic_token},
+     {SINGLE_INPUT, VARIANCE_OCTILE_TOKEN, "VarianceOctile", set_cfg_generic_token},
+ 
++#if FTR_LOSSLESS_SUPPORT
++    // Lossless coding
++    {SINGLE_INPUT, LOSSLESS_TOKEN, "Lossless", set_cfg_generic_token},
++#endif
+     // Termination
+     {SINGLE_INPUT, NULL, NULL, NULL}};
+ 
+diff --git a/Source/Lib/ASM_SSE4_1/highbd_fwd_txfm_sse4.c b/Source/Lib/ASM_SSE4_1/highbd_fwd_txfm_sse4.c
+index 83e44a38..f271b969 100644
+--- a/Source/Lib/ASM_SSE4_1/highbd_fwd_txfm_sse4.c
++++ b/Source/Lib/ASM_SSE4_1/highbd_fwd_txfm_sse4.c
+@@ -14727,3 +14727,83 @@ void svt_av1_fwd_txfm2d_64x16_N4_sse4_1(int16_t *input, int32_t *output, uint32_
+     clear_buffer_wxh_N4(outcoeff, num_col, txfm_size_row);
+     (void)bd;
+ }
++#if FTR_LOSSLESS_SUPPORT
++static inline void transpose_32bit_4x4(const __m128i *const in, __m128i *const out) {
++    // Unpack 32 bit elements. Goes from:
++    // in[0]: 00 01 02 03
++    // in[1]: 10 11 12 13
++    // in[2]: 20 21 22 23
++    // in[3]: 30 31 32 33
++    // to:
++    // a0:    00 10 01 11
++    // a1:    20 30 21 31
++    // a2:    02 12 03 13
++    // a3:    22 32 23 33
++
++    const __m128i a0 = _mm_unpacklo_epi32(in[0], in[1]);
++    const __m128i a1 = _mm_unpacklo_epi32(in[2], in[3]);
++    const __m128i a2 = _mm_unpackhi_epi32(in[0], in[1]);
++    const __m128i a3 = _mm_unpackhi_epi32(in[2], in[3]);
++
++    // Unpack 64 bit elements resulting in:
++    // out[0]: 00 10 20 30
++    // out[1]: 01 11 21 31
++    // out[2]: 02 12 22 32
++    // out[3]: 03 13 23 33
++    out[0] = _mm_unpacklo_epi64(a0, a1);
++    out[1] = _mm_unpackhi_epi64(a0, a1);
++    out[2] = _mm_unpacklo_epi64(a2, a3);
++    out[3] = _mm_unpackhi_epi64(a2, a3);
++}
++
++void svt_av1_fwht4x4_sse4_1(int16_t *input, int32_t *output, uint32_t stride) {
++    __m128i in[4];
++    in[0] = _mm_loadl_epi64((const __m128i *)(input + 0 * stride));
++    in[1] = _mm_loadl_epi64((const __m128i *)(input + 1 * stride));
++    in[2] = _mm_loadl_epi64((const __m128i *)(input + 2 * stride));
++    in[3] = _mm_loadl_epi64((const __m128i *)(input + 3 * stride));
++
++    // Convert to int32_t.
++    __m128i op[4];
++    op[0] = _mm_cvtepi16_epi32(in[0]);
++    op[1] = _mm_cvtepi16_epi32(in[1]);
++    op[2] = _mm_cvtepi16_epi32(in[2]);
++    op[3] = _mm_cvtepi16_epi32(in[3]);
++
++    for (int i = 0; i < 2; ++i) {
++        __m128i a1 = op[0];
++        __m128i b1 = op[1];
++        __m128i c1 = op[2];
++        __m128i d1 = op[3];
++        __m128i e1;
++
++        a1 = _mm_add_epi32(a1, b1); // a1 += b1
++        d1 = _mm_sub_epi32(d1, c1); // d1 = d1 - c1
++        e1 = _mm_sub_epi32(a1, d1); // e1 = (a1 - d1) >> 1
++        e1 = _mm_srai_epi32(e1, 1);
++        b1 = _mm_sub_epi32(e1, b1); // b1 = e1 - b1
++        c1 = _mm_sub_epi32(e1, c1); // c1 = e1 - c1
++        a1 = _mm_sub_epi32(a1, c1); // a1 -= c1
++        d1 = _mm_add_epi32(d1, b1); // d1 += b1
++
++        op[0] = a1;
++        op[1] = c1;
++        op[2] = d1;
++        op[3] = b1;
++
++        if (i == 0) {
++            transpose_32bit_4x4(op, op);
++        }
++    }
++
++    op[0] = _mm_slli_epi32(op[0], UNIT_QUANT_SHIFT);
++    op[1] = _mm_slli_epi32(op[1], UNIT_QUANT_SHIFT);
++    op[2] = _mm_slli_epi32(op[2], UNIT_QUANT_SHIFT);
++    op[3] = _mm_slli_epi32(op[3], UNIT_QUANT_SHIFT);
++
++    _mm_storeu_si128((__m128i *)(output + 0), op[0]);
++    _mm_storeu_si128((__m128i *)(output + 4), op[1]);
++    _mm_storeu_si128((__m128i *)(output + 8), op[2]);
++    _mm_storeu_si128((__m128i *)(output + 12), op[3]);
++}
++#endif
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.c b/Source/Lib/Codec/aom_dsp_rtcd.c
+index 138e1940..535ef410 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.c
++++ b/Source/Lib/Codec/aom_dsp_rtcd.c
+@@ -271,6 +271,9 @@ void svt_aom_setup_rtcd_internal(EbCpuFlags flags) {
+     SET_AVX2_AVX512(svt_aom_sad128x64, svt_aom_sad128x64_c, svt_aom_sad128x64_avx2, svt_aom_sad128x64_avx512);
+     SET_AVX2_AVX512(svt_aom_sad128x64x4d, svt_aom_sad128x64x4d_c, svt_aom_sad128x64x4d_avx2, svt_aom_sad128x64x4d_avx512);
+     SET_SSE41_AVX2_AVX512(svt_av1_txb_init_levels, svt_av1_txb_init_levels_c, svt_av1_txb_init_levels_sse4_1, svt_av1_txb_init_levels_avx2, svt_av1_txb_init_levels_avx512);
++#if FTR_LOSSLESS_SUPPORT
++    SET_SSE41(svt_av1_fwht4x4, svt_av1_fwht4x4_c, svt_av1_fwht4x4_sse4_1);
++#endif
+     SET_AVX2(svt_aom_satd, svt_aom_satd_c, svt_aom_satd_avx2);
+     SET_AVX2(svt_av1_block_error, svt_av1_block_error_c, svt_av1_block_error_avx2);
+     SET_SSE2(svt_aom_upsampled_pred, svt_aom_upsampled_pred_c, svt_aom_upsampled_pred_sse2);
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.h b/Source/Lib/Codec/aom_dsp_rtcd.h
+index 436aa203..bb4f6f88 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.h
++++ b/Source/Lib/Codec/aom_dsp_rtcd.h
+@@ -203,6 +203,11 @@ extern "C" {
+     RTCD_EXTERN void(*svt_av1_fwd_txfm2d_8x8_N4)(int16_t *input, int32_t *output, uint32_t input_stride, TxType transform_type, uint8_t  bit_depth);
+     void svt_aom_transform_two_d_4x4_N4_c(int16_t *input, int32_t *output, uint32_t input_stride, TxType transform_type, uint8_t  bit_depth);
+     RTCD_EXTERN void(*svt_av1_fwd_txfm2d_4x4_N4)(int16_t *input, int32_t *output, uint32_t input_stride, TxType transform_type, uint8_t  bit_depth);
++#if FTR_LOSSLESS_SUPPORT
++    void svt_av1_fwht4x4_c(int16_t* input, int32_t* output, uint32_t stride);
++    void svt_av1_fwht4x4_sse4_1(int16_t* input, int32_t* output, uint32_t stride);
++    RTCD_EXTERN void (*svt_av1_fwht4x4)(int16_t* input, int32_t* output, uint32_t stride);
++#endif
+     int svt_aom_satd_c(const TranLow *coeff, int length);
+     RTCD_EXTERN int(*svt_aom_satd)(const TranLow *coeff, int length);
+     int64_t svt_av1_block_error_c(const TranLow *coeff, const TranLow *dqcoeff, intptr_t block_size, int64_t *ssz);
+diff --git a/Source/Lib/Codec/coding_loop.c b/Source/Lib/Codec/coding_loop.c
+index ebb419be..2e3c1b39 100644
+--- a/Source/Lib/Codec/coding_loop.c
++++ b/Source/Lib/Codec/coding_loop.c
+@@ -402,7 +402,13 @@ static void av1_encode_loop(PictureControlSet *pcs, EncDecContext *ed_ctx, Super
+                                     is_16bit, // hbd
+                                     blk_geom->tx_width[blk_ptr->tx_depth],
+                                     blk_geom->tx_height[blk_ptr->tx_depth]);
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_estimate_transform(pcs,
++                                       ed_ctx->md_ctx,
++                                       ((int16_t *)residual16bit->buffer_y) + scratch_luma_offset,
++#else
+             svt_aom_estimate_transform(((int16_t *)residual16bit->buffer_y) + scratch_luma_offset,
++#endif
+                                        residual16bit->stride_y,
+                                        ((TranLow *)transform16bit->buffer_y) + ed_ctx->coded_area_sb,
+                                        NOT_USED_VALUE,
+@@ -478,7 +484,13 @@ static void av1_encode_loop(PictureControlSet *pcs, EncDecContext *ed_ctx, Super
+                                     is_16bit, // hbd
+                                     blk_geom->tx_width_uv[blk_ptr->tx_depth],
+                                     blk_geom->tx_height_uv[blk_ptr->tx_depth]);
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_estimate_transform(pcs,
++                                       ed_ctx->md_ctx,
++                                       ((int16_t *)residual16bit->buffer_cb) + scratch_cb_offset,
++#else
+             svt_aom_estimate_transform(((int16_t *)residual16bit->buffer_cb) + scratch_cb_offset,
++#endif
+                                        residual16bit->stride_cb,
+                                        ((TranLow *)transform16bit->buffer_cb) + ed_ctx->coded_area_sb_uv,
+                                        NOT_USED_VALUE,
+@@ -523,7 +535,13 @@ static void av1_encode_loop(PictureControlSet *pcs, EncDecContext *ed_ctx, Super
+                                     is_16bit, // hbd
+                                     blk_geom->tx_width_uv[blk_ptr->tx_depth],
+                                     blk_geom->tx_height_uv[blk_ptr->tx_depth]);
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_estimate_transform(pcs,
++                                       ed_ctx->md_ctx,
++                                       ((int16_t *)residual16bit->buffer_cr) + scratch_cb_offset,
++#else
+             svt_aom_estimate_transform(((int16_t *)residual16bit->buffer_cr) + scratch_cb_offset,
++#endif
+                                        residual16bit->stride_cr,
+                                        ((TranLow *)transform16bit->buffer_cr) + ed_ctx->coded_area_sb_uv,
+                                        NOT_USED_VALUE,
+@@ -582,7 +600,11 @@ static void av1_encode_loop(PictureControlSet *pcs, EncDecContext *ed_ctx, Super
+ *   Recon  (position independent)
+ *
+ **********************************************************/
++#if FTR_LOSSLESS_SUPPORT
++static void av1_encode_generate_recon(PictureControlSet *pcs, EncDecContext *ed_ctx, uint32_t org_x, uint32_t org_y,
++#else
+ static void av1_encode_generate_recon(EncDecContext *ed_ctx, uint32_t org_x, uint32_t org_y,
++#endif
+                                       EbPictureBufferDesc *pred_samples, // no basis/offset
+                                       EbPictureBufferDesc *residual16bit, // no basis/offset
+                                       uint32_t component_mask, uint16_t *eob) {
+@@ -595,8 +617,13 @@ static void av1_encode_generate_recon(EncDecContext *ed_ctx, uint32_t org_x, uin
+         if ((blk_ptr->y_has_coeff & (1 << ed_ctx->txb_itr)) && blk_ptr->skip_mode == FALSE) {
+             const uint32_t pred_luma_offset = (pred_samples->org_y + org_y) * pred_samples->stride_y +
+                 (pred_samples->org_x + org_x);
+-
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_inv_transform_recon_wrapper(pcs,
++                                                ed_ctx->md_ctx,
++                                                pred_samples->buffer_y,
++#else
+             svt_aom_inv_transform_recon_wrapper(pred_samples->buffer_y,
++#endif
+                                                 pred_luma_offset,
+                                                 pred_samples->stride_y,
+                                                 pred_samples->buffer_y,
+@@ -625,8 +652,13 @@ static void av1_encode_generate_recon(EncDecContext *ed_ctx, uint32_t org_x, uin
+         if ((blk_ptr->u_has_coeff & (1 << ed_ctx->txb_itr)) && blk_ptr->skip_mode == FALSE) {
+             const uint32_t pred_offset_cb = (((pred_samples->org_y + round_origin_y) >> 1) * pred_samples->stride_cb) +
+                 ((pred_samples->org_x + round_origin_x) >> 1);
+-
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_inv_transform_recon_wrapper(pcs,
++                                                ed_ctx->md_ctx,
++                                                pred_samples->buffer_cb,
++#else
+             svt_aom_inv_transform_recon_wrapper(pred_samples->buffer_cb,
++#endif
+                                                 pred_offset_cb,
+                                                 pred_samples->stride_cb,
+                                                 pred_samples->buffer_cb,
+@@ -647,8 +679,13 @@ static void av1_encode_generate_recon(EncDecContext *ed_ctx, uint32_t org_x, uin
+         if ((blk_ptr->v_has_coeff & (1 << ed_ctx->txb_itr)) && blk_ptr->skip_mode == FALSE) {
+             const uint32_t pred_offset_cr = (((pred_samples->org_y + round_origin_y) >> 1) * pred_samples->stride_cr) +
+                 ((pred_samples->org_x + round_origin_x) >> 1);
+-
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_inv_transform_recon_wrapper(pcs,
++                                                ed_ctx->md_ctx,
++                                                pred_samples->buffer_cr,
++#else
+             svt_aom_inv_transform_recon_wrapper(pred_samples->buffer_cr,
++#endif
+                                                 pred_offset_cr,
+                                                 pred_samples->stride_cr,
+                                                 pred_samples->buffer_cr,
+@@ -873,7 +910,12 @@ static void perform_intra_coding_loop(PictureControlSet *pcs, SuperBlock *sb_ptr
+                         inverse_quant_buffer,
+                         PICTURE_BUFFER_DESC_LUMA_MASK,
+                         eobs[ed_ctx->txb_itr]);
++#if FTR_LOSSLESS_SUPPORT
++        av1_encode_generate_recon(pcs,
++                                  ed_ctx,
++#else
+         av1_encode_generate_recon(ed_ctx,
++#endif
+                                   txb_origin_x,
+                                   txb_origin_y,
+                                   recon_buffer,
+@@ -1140,7 +1182,12 @@ static void perform_intra_coding_loop(PictureControlSet *pcs, SuperBlock *sb_ptr
+                         inverse_quant_buffer,
+                         PICTURE_BUFFER_DESC_CHROMA_MASK,
+                         eobs[ed_ctx->txb_itr]);
++#if FTR_LOSSLESS_SUPPORT
++        av1_encode_generate_recon(pcs,
++                                  ed_ctx,
++#else
+         av1_encode_generate_recon(ed_ctx,
++#endif
+                                   txb_origin_x,
+                                   txb_origin_y,
+                                   recon_buffer,
+@@ -1482,6 +1529,9 @@ static void perform_inter_coding_loop(SequenceControlSet *scs, PictureControlSet
+ 
+         //inter mode
+         av1_encode_generate_recon(
++#if FTR_LOSSLESS_SUPPORT
++            pcs,
++#endif
+             ctx,
+             txb_origin_x, //pic offset
+             txb_origin_y,
+@@ -1714,6 +1764,7 @@ EB_EXTERN void svt_aom_encode_decode(SequenceControlSet *scs, PictureControlSet
+         //And the mds_idx of the parent block is not set properly
+         //And it will generate the wrong cdf ctx and influence the MD for the next SB
+         blk_ptr->mds_idx = blk_it;
++
+         if (blk_ptr->part == PARTITION_SPLIT) {
+             blk_it += ctx->blk_geom->d1_depth_offset;
+             continue;
+@@ -2200,7 +2251,13 @@ EB_EXTERN EbErrorType svt_aom_encdec_update(SequenceControlSet *scs, PictureCont
+                     pcs->ep_txfm_context_na[tile_idx]->top_array[txfm_context_above_index]);
+                 blk_ptr->av1xd->left_txfm_context = &(
+                     pcs->ep_txfm_context_na[tile_idx]->left_array[txfm_context_left_index]);
++#if FTR_LOSSLESS_SUPPORT
++                svt_aom_tx_size_bits(pcs,
++                                     ctx->blk_ptr->segment_id,
++                                     md_ctx->md_rate_est_ctx,
++#else
+                 svt_aom_tx_size_bits(md_ctx->md_rate_est_ctx,
++#endif
+                                      blk_ptr->av1xd,
+                                      &(blk_ptr->av1xd->mi[0]->mbmi),
+                                      blk_geom->txsize[blk_ptr->tx_depth],
+diff --git a/Source/Lib/Codec/enc_dec_process.c b/Source/Lib/Codec/enc_dec_process.c
+index c594aaab..6bc1dc89 100644
+--- a/Source/Lib/Codec/enc_dec_process.c
++++ b/Source/Lib/Codec/enc_dec_process.c
+@@ -2224,7 +2224,10 @@ static void build_cand_block_array(SequenceControlSet *scs, PictureControlSet *p
+                 (blk_geom->sq_size < min_sq_size)
+             ? 0
+             : 1;
+-
++#if FTR_LOSSLESS_SUPPORT
++        // Only 8x8 and 16x16 block(s) are supported if lossless
++        is_block_tagged = pcs->mimic_only_tx_4x4 && blk_geom->sq_size > 8 ? 0 : is_block_tagged;
++#endif
+         // SQ/NSQ block(s) filter based on the block validity
+         if (is_block_tagged) {
+             if (first_stage || results_ptr->consider_block[blk_index]) {
+@@ -3289,6 +3292,7 @@ void *svt_aom_mode_decision_kernel(void *input_ptr) {
+                     pcs,
+                     scs,
+                     segment_index);
++
+                 for (y_sb_index = y_sb_start_index, sb_segment_index = sb_start_index;
+                      sb_segment_index < sb_start_index + sb_segment_count;
+                      ++y_sb_index) {
+@@ -3403,6 +3407,7 @@ void *svt_aom_mode_decision_kernel(void *input_ptr) {
+                         // PD0 is only skipped if there is a single depth to test
+                         if (skip_pd_pass_0)
+                             md_ctx->pred_depth_only = 1;
++
+                         // Multi-Pass PD
+                         if (!skip_pd_pass_0 && pcs->ppcs->multi_pass_pd_level == MULTI_PASS_PD_ON) {
+                             // [PD_PASS_0]
+@@ -3513,6 +3518,7 @@ void *svt_aom_mode_decision_kernel(void *input_ptr) {
+                         if (!ed_ctx->md_ctx->bypass_encdec) {
+                             svt_aom_encode_decode(scs, pcs, sb_ptr, sb_index, sb_origin_x, sb_origin_y, ed_ctx);
+                         }
++
+                         svt_aom_encdec_update(scs, pcs, sb_ptr, sb_index, sb_origin_x, sb_origin_y, ed_ctx);
+ 
+                         ed_ctx->coded_sb_count++;
+diff --git a/Source/Lib/Codec/enc_mode_config.c b/Source/Lib/Codec/enc_mode_config.c
+index 650dcdf4..2fd9b44e 100644
+--- a/Source/Lib/Codec/enc_mode_config.c
++++ b/Source/Lib/Codec/enc_mode_config.c
+@@ -5126,8 +5126,12 @@ void svt_aom_set_nsq_geom_ctrls(ModeDecisionContext *ctx, uint8_t nsq_geom_level
+ void svt_aom_set_nsq_search_ctrls(PictureControlSet *pcs, ModeDecisionContext *ctx, uint8_t nsq_search_level,
+                                   uint8_t resolution) {
+     NsqSearchCtrls *nsq_search_ctrls = &ctx->nsq_search_ctrls;
+-
+-    if (pcs->me_dist_mod && nsq_search_level) {
++#if FTR_LOSSLESS_SUPPORT
++    if (pcs->mimic_only_tx_4x4)
++        nsq_search_level = 0;
++    else
++#endif
++        if (pcs->me_dist_mod && nsq_search_level) {
+         uint32_t dist_64, dist_32, dist_16, dist_8, me_8x8_cost_variance;
+         if (pcs->scs->super_block_size == 64) {
+             dist_64              = pcs->ppcs->me_64x64_distortion[ctx->sb_index];
+@@ -6416,8 +6420,12 @@ void svt_aom_set_dist_based_ref_pruning_controls(ModeDecisionContext *ctx, uint8
+ }
+ static void set_txs_controls(PictureControlSet *pcs, ModeDecisionContext *ctx, uint8_t txs_level) {
+     TxsControls *txs_ctrls = &ctx->txs_ctrls;
+-
+-    if (pcs->me_dist_mod && txs_level) {
++#if FTR_LOSSLESS_SUPPORT
++    if (pcs->mimic_only_tx_4x4)
++        txs_level = 1;
++    else
++#endif
++        if (pcs->me_dist_mod && txs_level) {
+         // med-banding
+         uint32_t dist_64, dist_32, dist_16, dist_8, me_8x8_cost_variance;
+         if (pcs->scs->super_block_size == 64) {
+@@ -8364,8 +8372,11 @@ void svt_aom_sig_deriv_mode_decision_config(SequenceControlSet *scs, PictureCont
+                     avg_me_dist += ppcs->me_64x64_distortion[b64_idx];
+                 }
+                 avg_me_dist /= ppcs->b64_total_count;
++#if FTR_LOSSLESS_SUPPORT
++                avg_me_dist /= MAX(1, pcs->picture_qp);
++#else
+                 avg_me_dist /= pcs->picture_qp;
+-
++#endif
+                 ppcs->frm_hdr.use_ref_frame_mvs = avg_me_dist < 200 || input_resolution <= INPUT_SIZE_360p_RANGE ? 1
+                                                                                                                  : 0;
+             }
+diff --git a/Source/Lib/Codec/entropy_coding.c b/Source/Lib/Codec/entropy_coding.c
+index 754978c5..6bef0794 100644
+--- a/Source/Lib/Codec/entropy_coding.c
++++ b/Source/Lib/Codec/entropy_coding.c
+@@ -3520,9 +3520,14 @@ static void write_uncompressed_header_obu(SequenceControlSet *scs /*Av1Comp *cpi
+             }
+         }
+     }
++
+     if (frm_hdr->all_lossless) {
++#if FTR_LOSSLESS_SUPPORT
++        assert(av1_superres_unscaled(&(pcs->av1_cm->frm_size)));
++#else
+         SVT_ERROR("all_lossless\n");
+         //assert(av1_superres_unscaled(pcs));
++#endif
+     } else {
+         if (!frm_hdr->coded_lossless) {
+             encode_loopfilter(pcs, wb);
+@@ -3533,8 +3538,12 @@ static void write_uncompressed_header_obu(SequenceControlSet *scs /*Av1Comp *cpi
+         if (scs->seq_header.enable_restoration)
+             encode_restoration_mode(pcs, wb);
+     }
+-
+-    svt_aom_wb_write_bit(wb, frm_hdr->tx_mode == TX_MODE_SELECT);
++#if FTR_LOSSLESS_SUPPORT
++    if (frm_hdr->coded_lossless)
++        assert(1); // assert(frm_hdr->tx_mode == ONLY_4X4);
++    else
++#endif
++        svt_aom_wb_write_bit(wb, frm_hdr->tx_mode == TX_MODE_SELECT);
+     //write_tx_mode(cm, &pcs->tx_mode, wb);
+ 
+     if (pcs->allow_comp_inter_inter) {
+@@ -4508,14 +4517,24 @@ static void write_selected_tx_size(const MacroBlockD *xd, FRAME_CONTEXT *ec_ctx,
+         aom_write_symbol(w, depth, ec_ctx->tx_size_cdf[tx_size_cat][tx_size_ctx], max_depths + 1);
+     }
+ }
++#if FTR_LOSSLESS_SUPPORT
++static EbErrorType av1_code_tx_size(PictureControlSet *pcs, int segment_id, FRAME_CONTEXT *ec_ctx, AomWriter *w,
++                                    MacroBlockD *xd, const MbModeInfo *mbmi, TxSize tx_size, TxMode tx_mode,
++                                    BlockSize bsize, uint8_t skip) {
++#else
+ static EbErrorType av1_code_tx_size(FRAME_CONTEXT *ec_ctx, AomWriter *w, MacroBlockD *xd, const MbModeInfo *mbmi,
+                                     TxSize tx_size, TxMode tx_mode, BlockSize bsize, uint8_t skip) {
++#endif
+     EbErrorType return_error = EB_ErrorNone;
+     int         is_inter_tx  = is_inter_block(&mbmi->block_mi) || is_intrabc_block(&mbmi->block_mi);
+     //int skip = mbmi->skip;
+     //int segment_id = 0;// mbmi->segment_id;
+     if (tx_mode == TX_MODE_SELECT && block_signals_txsize(bsize) &&
++#if FTR_LOSSLESS_SUPPORT
++        !(is_inter_tx && skip) && !pcs->lossless[segment_id]) {
++#else
+         !(is_inter_tx && skip) /*&& !xd->lossless[segment_id]*/) {
++#endif
+         if (is_inter_tx) { // This implies skip flag is 0.
+             const TxSize max_tx_size = get_vartx_max_txsize(/*xd,*/ bsize, 0);
+             const int    txbh        = tx_size_high_unit[max_tx_size];
+@@ -4577,6 +4596,23 @@ void set_mi_row_col(PictureControlSet *pcs, MacroBlockD *xd, TileInfo *tile, int
+         if (mi_row & (xd->n8_w - 1))
+             xd->is_sec_rect = 1;
+ }
++#if FTR_LOSSLESS_SUPPORT
++static INLINE int svt_aom_get_segment_id(Av1Common *cm, const uint8_t *segment_ids, BlockSize bsize, int mi_row,
++                                         int mi_col) {
++    const int mi_offset = mi_row * cm->mi_cols + mi_col;
++    const int bw        = mi_size_wide[bsize];
++    const int bh        = mi_size_high[bsize];
++    const int xmis      = AOMMIN(cm->mi_cols - mi_col, bw);
++    const int ymis      = AOMMIN(cm->mi_rows - mi_row, bh);
++    int       x, y, segment_id = MAX_SEGMENTS;
++
++    for (y = 0; y < ymis; ++y)
++        for (x = 0; x < xmis; ++x) segment_id = AOMMIN(segment_id, segment_ids[mi_offset + y * cm->mi_cols + x]);
++
++    assert(segment_id >= 0 && segment_id < MAX_SEGMENTS);
++    return segment_id;
++}
++#endif
+ static void code_tx_size(PictureControlSet *pcs, uint32_t blk_org_x, uint32_t blk_org_y, EcBlkStruct *blk_ptr,
+                          const BlockGeom *blk_geom, NeighborArrayUnit *txfm_context_array, FRAME_CONTEXT *ec_ctx,
+                          AomWriter *w, uint8_t skip) {
+@@ -4598,9 +4634,26 @@ static void code_tx_size(PictureControlSet *pcs, uint32_t blk_org_x, uint32_t bl
+     xd->above_txfm_context       = &txfm_context_array->top_array[txfm_context_above_index];
+     xd->left_txfm_context        = &txfm_context_array->left_array[txfm_context_left_index];
+     TxSize tx_size = blk_geom->txsize[mbmi->block_mi.tx_depth]; // inherit tx_size from 1st transform block;
++#if FTR_LOSSLESS_SUPPORT
++    FrameHeader             *frm_hdr          = &pcs->ppcs->frm_hdr;
++    SegmentationNeighborMap *segmentation_map = pcs->segmentation_neighbor_map;
++    av1_code_tx_size(pcs,
++                     frm_hdr->segmentation_params.segmentation_enabled
++                         ? svt_aom_get_segment_id(cm, segmentation_map->data, BLOCK_4X4, mi_row, mi_col)
++                         : 0,
++                     ec_ctx,
++                     w,
++                     xd,
++                     mbmi,
++                     tx_size,
++                     tx_mode,
++                     bsize,
++                     skip);
++#else
+     av1_code_tx_size(ec_ctx, w, xd, mbmi, tx_size, tx_mode, bsize, skip);
++#endif
+ }
+-
++#if !FTR_LOSSLESS_SUPPORT
+ static INLINE int svt_aom_get_segment_id(Av1Common *cm, const uint8_t *segment_ids, BlockSize bsize, int mi_row,
+                                          int mi_col) {
+     const int mi_offset = mi_row * cm->mi_cols + mi_col;
+@@ -4616,7 +4669,7 @@ static INLINE int svt_aom_get_segment_id(Av1Common *cm, const uint8_t *segment_i
+     assert(segment_id >= 0 && segment_id < MAX_SEGMENTS);
+     return segment_id;
+ }
+-
++#endif
+ int svt_av1_get_spatial_seg_prediction(PictureControlSet *pcs, MacroBlockD *xd, uint32_t blk_org_x, uint32_t blk_org_y,
+                                        int *cdf_index) {
+     int prev_ul = -1; // top left segment_id
+diff --git a/Source/Lib/Codec/full_loop.c b/Source/Lib/Codec/full_loop.c
+index becb8f25..05ede147 100644
+--- a/Source/Lib/Codec/full_loop.c
++++ b/Source/Lib/Codec/full_loop.c
+@@ -1562,7 +1562,12 @@ uint8_t svt_aom_quantize_inv_quantize(PictureControlSet *pcs, ModeDecisionContex
+     Bool perform_rdoq;
+ 
+     // If rdoq_level is specified in the command line instruction, set perform_rdoq accordingly.
+-    perform_rdoq            = ((ctx->mds_skip_rdoq == FALSE || is_encode_pass) && ctx->rdoq_level);
++#if FTR_LOSSLESS_SUPPORT
++    perform_rdoq = !pcs->lossless[ctx->blk_ptr->segment_id] &&
++        ((ctx->mds_skip_rdoq == FALSE || is_encode_pass) && ctx->rdoq_level);
++#else
++    perform_rdoq = ((ctx->mds_skip_rdoq == FALSE || is_encode_pass) && ctx->rdoq_level);
++#endif
+     const int dequant_shift = ctx->hbd_md ? pcs->ppcs->enhanced_pic->bit_depth - 5 : 3;
+     const int qstep         = candidate_plane.dequant_qtx[1] /*[AC]*/ >> dequant_shift;
+     if (!is_encode_pass) {
+@@ -1683,8 +1688,12 @@ uint8_t svt_aom_quantize_inv_quantize(PictureControlSet *pcs, ModeDecisionContex
+     // Derive cul_level
+     return svt_av1_compute_cul_level(scan_order->scan, quant_coeff, eob);
+ }
+-
++#if FTR_LOSSLESS_SUPPORT
++void svt_aom_inv_transform_recon_wrapper(PictureControlSet *pcs, ModeDecisionContext *ctx, uint8_t *pred_buffer,
++                                         uint32_t pred_offset, uint32_t pred_stride,
++#else
+ void svt_aom_inv_transform_recon_wrapper(uint8_t *pred_buffer, uint32_t pred_offset, uint32_t pred_stride,
++#endif
+                                          uint8_t *rec_buffer, uint32_t rec_offset, uint32_t rec_stride,
+                                          int32_t *rec_coeff_buffer, uint32_t coeff_offset, Bool hbd, TxSize txsize,
+                                          TxType transform_type, PlaneType component_type, uint32_t eob) {
+@@ -1699,7 +1708,11 @@ void svt_aom_inv_transform_recon_wrapper(uint8_t *pred_buffer, uint32_t pred_off
+                                     transform_type,
+                                     component_type,
+                                     eob,
++#if FTR_LOSSLESS_SUPPORT
++                                    pcs->lossless[ctx->blk_ptr->segment_id]);
++#else
+                                     0 /*lossless*/);
++#endif
+     } else {
+         svt_aom_inv_transform_recon8bit(rec_coeff_buffer + coeff_offset,
+                                         pred_buffer + pred_offset,
+@@ -1710,7 +1723,11 @@ void svt_aom_inv_transform_recon_wrapper(uint8_t *pred_buffer, uint32_t pred_off
+                                         transform_type,
+                                         component_type,
+                                         eob,
++#if FTR_LOSSLESS_SUPPORT
++                                        pcs->lossless[ctx->blk_ptr->segment_id]);
++#else
+                                         0 /*lossless*/);
++#endif
+     }
+ }
+ /*
+@@ -1764,7 +1781,13 @@ void svt_aom_full_loop_chroma_light_pd1(PictureControlSet *pcs, ModeDecisionCont
+                                 ctx->blk_geom->bheight_uv);
+ 
+         // Cb Transform
++#if FTR_LOSSLESS_SUPPORT
++        svt_aom_estimate_transform(pcs,
++                                   ctx,
++                                   &(((int16_t *)cand_bf->residual->buffer_cb)[blk_chroma_origin_index]),
++#else
+         svt_aom_estimate_transform(&(((int16_t *)cand_bf->residual->buffer_cb)[blk_chroma_origin_index]),
++#endif
+                                    cand_bf->residual->stride_cb,
+                                    &(((int32_t *)ctx->tx_coeffs->buffer_cb)[0]),
+                                    NOT_USED_VALUE,
+@@ -1843,7 +1866,13 @@ void svt_aom_full_loop_chroma_light_pd1(PictureControlSet *pcs, ModeDecisionCont
+                                 ctx->blk_geom->bwidth_uv,
+                                 ctx->blk_geom->bheight_uv);
+         // Cr Transform
++#if FTR_LOSSLESS_SUPPORT
++        svt_aom_estimate_transform(pcs,
++                                   ctx,
++                                   &(((int16_t *)cand_bf->residual->buffer_cr)[blk_chroma_origin_index]),
++#else
+         svt_aom_estimate_transform(&(((int16_t *)cand_bf->residual->buffer_cr)[blk_chroma_origin_index]),
++#endif
+                                    cand_bf->residual->stride_cr,
+                                    &(((int32_t *)ctx->tx_coeffs->buffer_cr)[0]),
+                                    NOT_USED_VALUE,
+@@ -1992,7 +2021,13 @@ void svt_aom_full_loop_uv(PictureControlSet *pcs, ModeDecisionContext *ctx, Mode
+                 &(((int16_t *)cand_bf->residual->buffer_cb)[tu_cb_origin_index]);
+ 
+             // Cb Transform
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_estimate_transform(pcs,
++                                       ctx,
++                                       chroma_residual_ptr,
++#else
+             svt_aom_estimate_transform(chroma_residual_ptr,
++#endif
+                                        cand_bf->residual->stride_cb,
+                                        &(((int32_t *)ctx->tx_coeffs->buffer_cb)[txb_1d_offset]),
+                                        NOT_USED_VALUE,
+@@ -2029,7 +2064,13 @@ void svt_aom_full_loop_uv(PictureControlSet *pcs, ModeDecisionContext *ctx, Mode
+                 uint32_t cb_has_coeff = cand_bf->eob.u[txb_itr] > 0;
+ 
+                 if (cb_has_coeff)
++#if FTR_LOSSLESS_SUPPORT
++                    svt_aom_inv_transform_recon_wrapper(pcs,
++                                                        ctx,
++                                                        cand_bf->pred->buffer_cb,
++#else
+                     svt_aom_inv_transform_recon_wrapper(cand_bf->pred->buffer_cb,
++#endif
+                                                         tu_cb_origin_index,
+                                                         cand_bf->pred->stride_cb,
+                                                         cand_bf->recon->buffer_cb,
+@@ -2172,7 +2213,13 @@ void svt_aom_full_loop_uv(PictureControlSet *pcs, ModeDecisionContext *ctx, Mode
+                 &(((int16_t *)cand_bf->residual->buffer_cr)[tu_cr_origin_index]);
+ 
+             // Cr Transform
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_estimate_transform(pcs,
++                                       ctx,
++                                       chroma_residual_ptr,
++#else
+             svt_aom_estimate_transform(chroma_residual_ptr,
++#endif
+                                        cand_bf->residual->stride_cr,
+                                        &(((int32_t *)ctx->tx_coeffs->buffer_cr)[txb_1d_offset]),
+                                        NOT_USED_VALUE,
+@@ -2207,7 +2254,13 @@ void svt_aom_full_loop_uv(PictureControlSet *pcs, ModeDecisionContext *ctx, Mode
+                 uint32_t cr_has_coeff = cand_bf->eob.v[txb_itr] > 0;
+ 
+                 if (cr_has_coeff)
++#if FTR_LOSSLESS_SUPPORT
++                    svt_aom_inv_transform_recon_wrapper(pcs,
++                                                        ctx,
++                                                        cand_bf->pred->buffer_cr,
++#else
+                     svt_aom_inv_transform_recon_wrapper(cand_bf->pred->buffer_cr,
++#endif
+                                                         tu_cr_origin_index,
+                                                         cand_bf->pred->stride_cr,
+                                                         cand_bf->recon->buffer_cr,
+diff --git a/Source/Lib/Codec/full_loop.h b/Source/Lib/Codec/full_loop.h
+index 76315419..0ce7619d 100644
+--- a/Source/Lib/Codec/full_loop.h
++++ b/Source/Lib/Codec/full_loop.h
+@@ -34,7 +34,12 @@ void svt_aom_full_loop_uv(PictureControlSet *pcs, ModeDecisionContext *ctx, Mode
+                           uint64_t cb_full_distortion[DIST_TOTAL][DIST_CALC_TOTAL],
+                           uint64_t cr_full_distortion[DIST_TOTAL][DIST_CALC_TOTAL], uint64_t *cb_coeff_bits,
+                           uint64_t *cr_coeff_bits, Bool is_full_loop);
++#if FTR_LOSSLESS_SUPPORT
++void svt_aom_inv_transform_recon_wrapper(PictureControlSet *pcs, ModeDecisionContext *ctx, uint8_t *pred_buffer,
++                                         uint32_t pred_offset, uint32_t pred_stride,
++#else
+ void svt_aom_inv_transform_recon_wrapper(uint8_t *pred_buffer, uint32_t pred_offset, uint32_t pred_stride,
++#endif
+                                          uint8_t *rec_buffer, uint32_t rec_offset, uint32_t rec_stride,
+                                          int32_t *rec_coeff_buffer, uint32_t coeff_offset, Bool hbd, TxSize txsize,
+                                          TxType transform_type, PlaneType component_type, uint32_t eob);
+diff --git a/Source/Lib/Codec/md_config_process.c b/Source/Lib/Codec/md_config_process.c
+index 803f9a04..8d517002 100644
+--- a/Source/Lib/Codec/md_config_process.c
++++ b/Source/Lib/Codec/md_config_process.c
+@@ -591,9 +591,12 @@ void *svt_aom_mode_decision_configuration_kernel(void *input_ptr) {
+         RateControlResults *rc_results = (RateControlResults *)rc_results_wrapper->object_ptr;
+         PictureControlSet  *pcs        = (PictureControlSet *)rc_results->pcs_wrapper->object_ptr;
+         SequenceControlSet *scs        = pcs->scs;
+-        pcs->min_me_clpx               = 0;
+-        pcs->max_me_clpx               = 0;
+-        pcs->avg_me_clpx               = 0;
++#if FTR_LOSSLESS_SUPPORT
++        pcs->mimic_only_tx_4x4 = 0;
++#endif
++        pcs->min_me_clpx = 0;
++        pcs->max_me_clpx = 0;
++        pcs->avg_me_clpx = 0;
+         if (pcs->slice_type != I_SLICE) {
+             uint32_t b64_idx;
+             uint64_t avg_me_clpx = 0;
+@@ -643,7 +646,8 @@ void *svt_aom_mode_decision_configuration_kernel(void *input_ptr) {
+         }
+ 
+         FrameHeader *frm_hdr = &pcs->ppcs->frm_hdr;
+-        pcs->rtc_tune        = (scs->static_config.pred_structure == SVT_AV1_PRED_LOW_DELAY_B) ? true : false;
++
++        pcs->rtc_tune = (scs->static_config.pred_structure == SVT_AV1_PRED_LOW_DELAY_B) ? true : false;
+         // Mode Decision Configuration Kernel Signal(s) derivation
+         svt_aom_sig_deriv_mode_decision_config(scs, pcs);
+ 
+@@ -894,6 +898,71 @@ void *svt_aom_mode_decision_configuration_kernel(void *input_ptr) {
+             }
+         }
+ 
++#if FTR_LOSSLESS_SUPPORT // ---
++        if (frm_hdr->segmentation_params.segmentation_enabled) {
++            Bool has_lossless_segment = 0;
++            // Loop through each segment to determine if it is coded losslessly
++            for (int segment_id = 0; segment_id < MAX_SEGMENTS; segment_id++) {
++                pcs->lossless[segment_id] = 0;
++
++                pcs->lossless[segment_id] =
++                    ((int16_t)((int16_t)pcs->ppcs->frm_hdr.quantization_params.base_q_idx +
++                               pcs->ppcs->frm_hdr.segmentation_params.feature_data[segment_id][SEG_LVL_ALT_Q])) <= 0 &&
++                    !frm_hdr->quantization_params.delta_q_dc[AOM_PLANE_Y] &&
++                    !frm_hdr->quantization_params.delta_q_ac[AOM_PLANE_U] &&
++                    !frm_hdr->quantization_params.delta_q_dc[AOM_PLANE_U] &&
++                    !frm_hdr->quantization_params.delta_q_ac[AOM_PLANE_V] &&
++                    !frm_hdr->quantization_params.delta_q_dc[AOM_PLANE_V];
++
++                has_lossless_segment = has_lossless_segment || pcs->lossless[segment_id];
++            }
++            // Derive coded_lossless; true if the frame is fully lossless at the coded resolution.
++            frm_hdr->coded_lossless = 1;
++            for (int segment_id = 0; segment_id < MAX_SEGMENTS; segment_id++) {
++                if (!pcs->lossless[segment_id]) {
++                    frm_hdr->coded_lossless = 0;
++                    break;
++                }
++            }
++            // To Do: fix the case of lossy and lossless segments in the same frame
++            if (!frm_hdr->coded_lossless && has_lossless_segment)
++                frm_hdr->segmentation_params.segmentation_enabled = 0;
++        }
++        if (!frm_hdr->segmentation_params.segmentation_enabled) {
++            frm_hdr->coded_lossless = pcs->lossless[0] = !pcs->ppcs->frm_hdr.quantization_params.base_q_idx &&
++                !frm_hdr->quantization_params.delta_q_dc[AOM_PLANE_Y] &&
++                !frm_hdr->quantization_params.delta_q_ac[AOM_PLANE_U] &&
++                !frm_hdr->quantization_params.delta_q_dc[AOM_PLANE_U] &&
++                !frm_hdr->quantization_params.delta_q_ac[AOM_PLANE_V] &&
++                !frm_hdr->quantization_params.delta_q_dc[AOM_PLANE_V];
++        }
++
++        // Derive all_lossless; if super-resolution is used, such a frame will still NOT be lossless at the upscaled resolution.
++        frm_hdr->all_lossless = frm_hdr->coded_lossless && av1_superres_unscaled(&(pcs->ppcs->av1_cm->frm_size));
++
++        if (frm_hdr->coded_lossless) {
++            pcs->ppcs->frm_hdr.delta_q_params.delta_q_present = 0;
++            pcs->ppcs->dlf_ctrls.enabled                      = 0;
++            pcs->ppcs->cdef_level                             = 0;
++        }
++
++        if (frm_hdr->all_lossless)
++            pcs->ppcs->enable_restoration = 0;
++
++        // The following shortcuts are necessary to enforce the use of block_4x4, block_8x8, and Tx_4x4,
++        // these cannot be controlled at the block level, so they are invoked even if only one segment is marked as lossless
++        if (frm_hdr
++                ->coded_lossless /*|| (frm_hdr->segmentation_params.segmentation_enabled && has_lossless_segment)*/) {
++            pcs->mimic_only_tx_4x4                      = 1;
++            frm_hdr->tx_mode                            = TX_MODE_SELECT;
++            pcs->pic_depth_removal_level                = 0;
++            pcs->pic_depth_removal_level_rtc            = 0;
++            pcs->pic_block_based_depth_refinement_level = 0;
++            pcs->pic_lpd0_lvl                           = 0;
++            pcs->pic_lpd1_lvl                           = 0;
++        }
++#endif
++
+         // Release Rate Control Results
+         svt_release_object(rc_results_wrapper);
+     }
+diff --git a/Source/Lib/Codec/md_process.c b/Source/Lib/Codec/md_process.c
+index 7aeae620..432b9272 100644
+--- a/Source/Lib/Codec/md_process.c
++++ b/Source/Lib/Codec/md_process.c
+@@ -150,8 +150,12 @@ EbErrorType svt_aom_mode_decision_context_ctor(ModeDecisionContext *ctx, EbColor
+     // get the min scaling level (the smallest scaling level is the most conservative)
+     uint8_t min_nic_scaling_level = NICS_SCALING_LEVELS - 1;
+     for (uint8_t is_base = 0; is_base < 2; is_base++) {
++#if FTR_LOSSLESS_SUPPORT
++        for (uint8_t qp = MIN_QP_VALUE; qp <= MAX_QP_VALUE; qp++) {
++#else
+         // min QP is 1 b/c 0 is lossless and is not supported
+         for (uint8_t qp = 1; qp <= MAX_QP_VALUE; qp++) {
++#endif
+             uint8_t nic_level         = svt_aom_get_nic_level(enc_mode, is_base, qp, seq_qp_mod);
+             uint8_t nic_scaling_level = svt_aom_set_nic_controls(NULL, nic_level);
+             min_nic_scaling_level     = MIN(min_nic_scaling_level, nic_scaling_level);
+@@ -232,8 +236,12 @@ EbErrorType svt_aom_mode_decision_context_ctor(ModeDecisionContext *ctx, EbColor
+     // Allocate buffers for obmc prediction
+     uint8_t obmc_allowed = 0;
+     for (uint8_t is_base = 0; is_base < 2; is_base++) {
++#if FTR_LOSSLESS_SUPPORT
++        for (uint8_t qp = MIN_QP_VALUE; qp <= MAX_QP_VALUE; qp++) {
++#else
+         // min QP is 1 b/c 0 is lossless and is not supported
+         for (uint8_t qp = 1; qp <= MAX_QP_VALUE; qp++) {
++#endif
+             if (obmc_allowed)
+                 break;
+             obmc_allowed |= svt_aom_get_obmc_level(enc_mode, qp, is_base, seq_qp_mod);
+diff --git a/Source/Lib/Codec/mode_decision.c b/Source/Lib/Codec/mode_decision.c
+index dd36ca89..bb518fee 100644
+--- a/Source/Lib/Codec/mode_decision.c
++++ b/Source/Lib/Codec/mode_decision.c
+@@ -3919,6 +3919,11 @@ static void inject_intra_candidates(
+                 svt_aom_get_intra_uv_tx_type(cand_array[cand_total_cnt].intra_chroma_mode,
+                     ctx->blk_geom->txsize_uv[0],
+                     frm_hdr->reduced_tx_set);
++
++#if FTR_LOSSLESS_SUPPORT
++                if (pcs->lossless[ctx->blk_ptr->segment_id] && cand_array[cand_total_cnt].transform_type_uv != DCT_DCT)
++                    continue;
++#endif
+             cand_array[cand_total_cnt].ref_frame_type = INTRA_FRAME;
+             cand_array[cand_total_cnt].motion_mode = SIMPLE_TRANSLATION;
+             cand_array[cand_total_cnt].is_interintra_used = 0;
+@@ -3971,6 +3976,10 @@ static void inject_filter_intra_candidates(
+                 svt_aom_get_intra_uv_tx_type(cand_array[cand_total_cnt].intra_chroma_mode,
+                     ctx->blk_geom->txsize_uv[0],
+                     frm_hdr->reduced_tx_set);
++#if FTR_LOSSLESS_SUPPORT
++                if (pcs->lossless[ctx->blk_ptr->segment_id] && cand_array[cand_total_cnt].transform_type_uv != DCT_DCT)
++                    continue;
++#endif
+             cand_array[cand_total_cnt].ref_frame_type = INTRA_FRAME;
+             cand_array[cand_total_cnt].motion_mode = SIMPLE_TRANSLATION;
+             cand_array[cand_total_cnt].is_interintra_used = 0;
+@@ -4085,6 +4094,10 @@ void  inject_palette_candidates(
+             svt_aom_get_intra_uv_tx_type(cand_array[can_total_cnt].intra_chroma_mode,
+                 ctx->blk_geom->txsize_uv[0],
+                 pcs->ppcs->frm_hdr.reduced_tx_set);
++#if FTR_LOSSLESS_SUPPORT
++            if (pcs->lossless[ctx->blk_ptr->segment_id] && cand_array[can_total_cnt].transform_type_uv != DCT_DCT)
++                continue;
++#endif
+         cand_array[can_total_cnt].ref_frame_type = INTRA_FRAME;
+         cand_array[can_total_cnt].motion_mode = SIMPLE_TRANSLATION;
+         INC_MD_CAND_CNT (can_total_cnt,pcs->ppcs->max_can_count);
+diff --git a/Source/Lib/Codec/pcs.h b/Source/Lib/Codec/pcs.h
+index 37b23633..e33970ea 100644
+--- a/Source/Lib/Codec/pcs.h
++++ b/Source/Lib/Codec/pcs.h
+@@ -441,6 +441,11 @@ typedef struct PictureControlSet {
+     // different with input frame when reference scaling is enabled
+     EbPictureBufferDesc *scaled_input_pic;
+     bool                 rtc_tune;
++#if FTR_LOSSLESS_SUPPORT
++    // lossless[s] is true if segment 's' is coded losslessly.
++    Bool lossless[MAX_SEGMENTS];
++    Bool mimic_only_tx_4x4;
++#endif
+ } PictureControlSet;
+ 
+ // To optimize based on the max input size
+diff --git a/Source/Lib/Codec/product_coding_loop.c b/Source/Lib/Codec/product_coding_loop.c
+index ce0df4bd..0d35679e 100644
+--- a/Source/Lib/Codec/product_coding_loop.c
++++ b/Source/Lib/Codec/product_coding_loop.c
+@@ -672,7 +672,12 @@ static void md_update_all_neighbour_arrays_multiple(PictureControlSet *pcs, Mode
+ * av1_perform_inverse_transform_recon_luma
+ * Apply inverse transform for Luma samples
+ ************************************************************************************************/
++#if FTR_LOSSLESS_SUPPORT
++void av1_perform_inverse_transform_recon_luma(PictureControlSet *pcs, ModeDecisionContext *ctx,
++                                              ModeDecisionCandidateBuffer *cand_bf) {
++#else
+ void av1_perform_inverse_transform_recon_luma(ModeDecisionContext *ctx, ModeDecisionCandidateBuffer *cand_bf) {
++#endif
+     uint32_t tu_total_count;
+     uint32_t txb_itr;
+ 
+@@ -690,7 +695,13 @@ void av1_perform_inverse_transform_recon_luma(ModeDecisionContext *ctx, ModeDeci
+         uint32_t rec_luma_offset  = txb_origin_x + txb_origin_y * cand_bf->recon->stride_y;
+         uint32_t y_has_coeff      = (cand_bf->y_has_coeff & (1 << txb_itr)) > 0;
+         if (y_has_coeff)
++#if FTR_LOSSLESS_SUPPORT
+             svt_aom_inv_transform_recon_wrapper(
++                pcs,
++                ctx,
++#else
++            svt_aom_inv_transform_recon_wrapper(
++#endif
+                 cand_bf->pred->buffer_y,
+                 txb_origin_index,
+                 cand_bf->pred->stride_y,
+@@ -802,7 +813,13 @@ static void av1_perform_inverse_transform_recon(PictureControlSet *pcs, ModeDeci
+             }
+         }
+         if (ctx->blk_ptr->y_has_coeff & (1 << txb_itr)) {
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_inv_transform_recon_wrapper(pcs,
++                                                ctx,
++                                                cand_bf->pred->buffer_y,
++#else
+             svt_aom_inv_transform_recon_wrapper(cand_bf->pred->buffer_y,
++#endif
+                                                 txb_origin_index,
+                                                 cand_bf->pred->stride_y << ctx->mds_subres_step,
+                                                 recon_buffer->buffer_y,
+@@ -880,7 +897,13 @@ static void av1_perform_inverse_transform_recon(PictureControlSet *pcs, ModeDeci
+                     ((((txb_origin_x >> 3) << 3) + ((txb_origin_y >> 3) << 3) * cand_bf->rec_coeff->stride_cr) >> 1);
+ 
+                 if (ctx->blk_ptr->u_has_coeff & (1 << txb_itr))
++#if FTR_LOSSLESS_SUPPORT
++                    svt_aom_inv_transform_recon_wrapper(pcs,
++                                                        ctx,
++                                                        cand_bf->pred->buffer_cb,
++#else
+                     svt_aom_inv_transform_recon_wrapper(cand_bf->pred->buffer_cb,
++#endif
+                                                         cb_tu_chroma_origin_index,
+                                                         cand_bf->pred->stride_cb,
+                                                         recon_buffer->buffer_cb,
+@@ -908,7 +931,13 @@ static void av1_perform_inverse_transform_recon(PictureControlSet *pcs, ModeDeci
+                                          ctx->hbd_md);
+ 
+                 if (ctx->blk_ptr->v_has_coeff & (1 << txb_itr))
++#if FTR_LOSSLESS_SUPPORT
++                    svt_aom_inv_transform_recon_wrapper(pcs,
++                                                        ctx,
++                                                        cand_bf->pred->buffer_cr,
++#else
+                     svt_aom_inv_transform_recon_wrapper(cand_bf->pred->buffer_cr,
++#endif
+                                                         cr_tu_chroma_origin_index,
+                                                         cand_bf->pred->stride_cr,
+                                                         recon_buffer->buffer_cr,
+@@ -3614,12 +3643,20 @@ static uint64_t md_cfl_rd_pick_alpha(PictureControlSet *pcs, ModeDecisionCandida
+ }
+ 
+ /* Compute the AC components of the luma prediction that are used to generate CFL predictions. */
++#if FTR_LOSSLESS_SUPPORT
++static void compute_cfl_ac_components(PictureControlSet *pcs, ModeDecisionContext *ctx,
++                                      ModeDecisionCandidateBuffer *cand_bf) {
++#else
+ static void compute_cfl_ac_components(ModeDecisionContext *ctx, ModeDecisionCandidateBuffer *cand_bf) {
++#endif
+     const BlockGeom *const blk_geom = ctx->blk_geom;
+ 
+     // 1: recon the Luma
++#if FTR_LOSSLESS_SUPPORT
++    av1_perform_inverse_transform_recon_luma(pcs, ctx, cand_bf);
++#else
+     av1_perform_inverse_transform_recon_luma(ctx, cand_bf);
+-
++#endif
+     // 2: Form the pred_buf_q3
+     const uint32_t rec_luma_offset = ((blk_geom->org_y >> 3) << 3) * cand_bf->recon->stride_y +
+         ((blk_geom->org_x >> 3) << 3);
+@@ -3738,8 +3775,11 @@ static void cfl_prediction(PictureControlSet *pcs, ModeDecisionCandidateBuffer *
+     }
+ 
+     // Compute AC component of CFL prediction
++#if FTR_LOSSLESS_SUPPORT
++    compute_cfl_ac_components(pcs, ctx, cand_bf);
++#else
+     compute_cfl_ac_components(ctx, cand_bf);
+-
++#endif
+     // Loop over alphas and find the best CFL params
+     uint8_t  cfl_alpha_idx = 0, cfl_alpha_signs = 0;
+     uint64_t cfl_rd = md_cfl_rd_pick_alpha(pcs,
+@@ -4347,7 +4387,13 @@ static void perform_tx_light_pd0(PictureControlSet *pcs, ModeDecisionContext *ct
+     EB_TRANS_COEFF_SHAPE pf_shape = ctx->pf_ctrls.pf_shape;
+ 
+     // Y: T Q i_q
++#if FTR_LOSSLESS_SUPPORT
++    svt_aom_estimate_transform(pcs,
++                               ctx,
++                               &(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#else
+     svt_aom_estimate_transform(&(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#endif
+                                cand_bf->residual->stride_y,
+                                transf_coeff,
+                                NOT_USED_VALUE,
+@@ -4616,7 +4662,13 @@ static void tx_type_search(PictureControlSet *pcs, ModeDecisionContext *ctx, Mod
+             ctx->three_quad_energy               = 0;
+             if (!tx_search_skip_flag) {
+                 // Y: T Q i_q
++#if FTR_LOSSLESS_SUPPORT
++                svt_aom_estimate_transform(pcs,
++                                           ctx,
++                                           &(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#else
+                 svt_aom_estimate_transform(&(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#endif
+                                            cand_bf->residual->stride_y,
+                                            &(((int32_t *)ctx->tx_coeffs->buffer_y)[ctx->txb_1d_offset]),
+                                            NOT_USED_VALUE,
+@@ -4669,7 +4721,13 @@ static void tx_type_search(PictureControlSet *pcs, ModeDecisionContext *ctx, Mod
+             // Perform T-1 if mds_spatial_sse or  INTRA and tx_depth > 0 or
+             if (ctx->mds_spatial_sse || (!is_inter && cand_bf->cand->tx_depth)) {
+                 if (y_has_coeff)
++#if FTR_LOSSLESS_SUPPORT
++                    svt_aom_inv_transform_recon_wrapper(pcs,
++                                                        ctx,
++                                                        cand_bf->pred->buffer_y,
++#else
+                     svt_aom_inv_transform_recon_wrapper(cand_bf->pred->buffer_y,
++#endif
+                                                         txb_origin_index,
+                                                         cand_bf->pred->stride_y,
+                                                         recon_ptr->buffer_y,
+@@ -5309,7 +5367,13 @@ static void perform_dct_dct_tx_light_pd1(PictureControlSet *pcs, ModeDecisionCon
+     EbPictureBufferDesc *const quant_coeff_ptr = cand_bf->quant;
+ 
+     // Y: T Q i_q
++#if FTR_LOSSLESS_SUPPORT
++    svt_aom_estimate_transform(pcs,
++                               ctx,
++                               &(((int16_t *)cand_bf->residual->buffer_y)[loc->blk_origin_index]),
++#else
+     svt_aom_estimate_transform(&(((int16_t *)cand_bf->residual->buffer_y)[loc->blk_origin_index]),
++#endif
+                                cand_bf->residual->stride_y,
+                                &(((int32_t *)ctx->tx_coeffs->buffer_y)[0]),
+                                NOT_USED_VALUE,
+@@ -5498,7 +5562,13 @@ static void perform_dct_dct_tx(PictureControlSet *pcs, ModeDecisionContext *ctx,
+ 
+     if (!tx_search_skip_flag) {
+         // Y: T Q i_q
++#if FTR_LOSSLESS_SUPPORT
++        svt_aom_estimate_transform(pcs,
++                                   ctx,
++                                   &(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#else
+         svt_aom_estimate_transform(&(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#endif
+                                    cand_bf->residual->stride_y,
+                                    &(((int32_t *)ctx->tx_coeffs->buffer_y)[txb_1d_offset]),
+                                    NOT_USED_VALUE,
+@@ -5538,7 +5608,13 @@ static void perform_dct_dct_tx(PictureControlSet *pcs, ModeDecisionContext *ctx,
+         assert(IMPLIES(ssim_level > SSIM_LVL_0, ctx->pd_pass == PD_PASS_1));
+         assert(IMPLIES(ssim_level > SSIM_LVL_0, ctx->md_stage == MD_STAGE_3));
+         if (cand_bf->eob.y[txb_itr])
++#if FTR_LOSSLESS_SUPPORT
++            svt_aom_inv_transform_recon_wrapper(pcs,
++                                                ctx,
++                                                cand_bf->pred->buffer_y,
++#else
+             svt_aom_inv_transform_recon_wrapper(cand_bf->pred->buffer_y,
++#endif
+                                                 txb_origin_index,
+                                                 cand_bf->pred->stride_y,
+                                                 recon_ptr->buffer_y,
+@@ -6531,6 +6607,11 @@ static void full_loop_core(PictureControlSet *pcs, ModeDecisionContext *ctx, Mod
+         start_tx_depth = 0;
+         end_tx_depth   = 0;
+     }
++#if FTR_LOSSLESS_SUPPORT
++    // Force the use of TX_4X4 for 8x8 block(s)
++    if (pcs->mimic_only_tx_4x4 && ctx->blk_geom->sq_size == 8)
++        start_tx_depth = end_tx_depth = 1;
++#endif
+     // Check if should perform TX type search
+     if (ctx->blk_geom->sq_size <= 64 && start_tx_depth == 0 && end_tx_depth == 0 && // TXS off
+         !pcs->ppcs->sc_class1 && // Can't be SC b/c SC tries DCT_DCT and IDTX when only_dct_dct is 1
+@@ -6729,10 +6810,16 @@ static void md_stage_2(PictureControlSet *pcs, ModeDecisionContext *ctx, EbPictu
+         ModeDecisionCandidateBuffer *cand_bf        = cand_bf_ptr_array[candidateIndex];
+         ModeDecisionCandidate       *cand           = cand_bf->cand;
+         ctx->mds_tx_size_mode                       = 0;
+-        ctx->mds_txt_level                          = is_intra_mode(cand->pred_mode) ? ctx->txt_ctrls.enabled : 0;
+-        ctx->mds_skip_rdoq                          = is_intra_mode(cand->pred_mode) ? TRUE : FALSE;
+-        ctx->mds_skip_full_uv                       = TRUE;
+-        ctx->mds_spatial_sse                        = ctx->spatial_sse_ctrls.spatial_sse_full_loop_level;
++#if FTR_LOSSLESS_SUPPORT
++        ctx->mds_txt_level = pcs->lossless[ctx->blk_ptr->segment_id] ? 0
++            : is_intra_mode(cand->pred_mode)                         ? ctx->txt_ctrls.enabled
++                                                                     : 0;
++#else
++        ctx->mds_txt_level = is_intra_mode(cand->pred_mode) ? ctx->txt_ctrls.enabled : 0;
++#endif
++        ctx->mds_skip_rdoq            = is_intra_mode(cand->pred_mode) ? TRUE : FALSE;
++        ctx->mds_skip_full_uv         = TRUE;
++        ctx->mds_spatial_sse          = ctx->spatial_sse_ctrls.spatial_sse_full_loop_level;
+         ctx->mds_fast_coeff_est_level = (ctx->pd_pass == PD_PASS_1) ? 1 : ctx->rate_est_ctrls.pd0_fast_coeff_est_level;
+         ctx->mds_subres_step          = (ctx->pd_pass == PD_PASS_1) ? 0 : ctx->subres_ctrls.step;
+ 
+@@ -6850,9 +6937,11 @@ static void md_stage_3(PictureControlSet *pcs, ModeDecisionContext *ctx, EbPictu
+         ctx->mds_skip_ifs = (ctx->ifs_ctrls.level == IFS_MDS3) ? FALSE : TRUE;
+ 
+         ctx->mds_tx_size_mode = ctx->txs_ctrls.enabled && (ctx->blk_geom->sq_size >= ctx->txs_ctrls.min_sq_size);
+-
++#if FTR_LOSSLESS_SUPPORT
++        ctx->mds_txt_level = pcs->lossless[ctx->blk_ptr->segment_id] ? 0 : ctx->txt_ctrls.enabled;
++#else
+         ctx->mds_txt_level = ctx->txt_ctrls.enabled;
+-
++#endif
+         ctx->mds_skip_full_uv = FALSE;
+ 
+         ctx->mds_skip_rdoq = FALSE;
+@@ -7138,6 +7227,10 @@ static void search_best_mds3_uv_mode(PictureControlSet *pcs, EbPictureBufferDesc
+         cand_array[uv_mode_total_count].motion_mode               = SIMPLE_TRANSLATION;
+         cand_array[uv_mode_total_count].transform_type_uv         = svt_aom_get_intra_uv_tx_type(
+             cand_array[uv_mode_total_count].intra_chroma_mode, ctx->blk_geom->txsize_uv[0], frm_hdr->reduced_tx_set);
++#if FTR_LOSSLESS_SUPPORT // fix
++        if (pcs->lossless[ctx->blk_ptr->segment_id] && cand_array[uv_mode_total_count].transform_type_uv != DCT_DCT)
++            continue;
++#endif
+         uv_mode_total_count++;
+     }
+     uv_mode_total_count = uv_mode_total_count - start_fast_buffer_index;
+@@ -7335,6 +7428,11 @@ static void search_best_independent_uv_mode(PictureControlSet *pcs, EbPictureBuf
+                 cand_array[uv_mode_total_count].motion_mode                = SIMPLE_TRANSLATION;
+                 cand_array[uv_mode_total_count].transform_type_uv          = svt_aom_get_intra_uv_tx_type(
+                     uv_mode, ctx->blk_geom->txsize_uv[0], frm_hdr->reduced_tx_set);
++#if FTR_LOSSLESS_SUPPORT // fix
++                if (pcs->lossless[ctx->blk_ptr->segment_id] &&
++                    cand_array[uv_mode_total_count].transform_type_uv != DCT_DCT)
++                    continue;
++#endif
+                 uv_mode_total_count++;
+             }
+         }
+@@ -8866,7 +8964,13 @@ static void non_normative_txs(PictureControlSet *pcs, ModeDecisionContext *ctx,
+                 EbPictureBufferDesc *quant_coeff_ptr = cand_bf->quant;
+ 
+                 ctx->three_quad_energy = 0;
++#if FTR_LOSSLESS_SUPPORT
++                svt_aom_estimate_transform(pcs,
++                                           ctx,
++                                           &(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#else
+                 svt_aom_estimate_transform(&(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#endif
+                                            cand_bf->residual->stride_y,
+                                            &(((int32_t *)ctx->tx_coeffs->buffer_y)[ctx->txb_1d_offset]),
+                                            NOT_USED_VALUE,
+@@ -8922,7 +9026,13 @@ static void non_normative_txs(PictureControlSet *pcs, ModeDecisionContext *ctx,
+                 EbPictureBufferDesc *quant_coeff_ptr = cand_bf->quant;
+ 
+                 ctx->three_quad_energy = 0;
++#if FTR_LOSSLESS_SUPPORT
++                svt_aom_estimate_transform(pcs,
++                                           ctx,
++                                           &(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#else
+                 svt_aom_estimate_transform(&(((int16_t *)cand_bf->residual->buffer_y)[txb_origin_index]),
++#endif
+                                            cand_bf->residual->stride_y,
+                                            &(((int32_t *)ctx->tx_coeffs->buffer_y)[ctx->txb_1d_offset]),
+                                            NOT_USED_VALUE,
+@@ -10307,6 +10417,7 @@ static void update_d2_decision_light_pd0(PictureControlSet *pcs, ModeDecisionCon
+  */
+ static void update_d2_decision(PictureControlSet *pcs, ModeDecisionContext *ctx) {
+     uint32_t last_blk_index_mds;
++
+     if (ctx->pd_pass == PD_PASS_1 && ctx->pred_depth_only)
+         last_blk_index_mds = ctx->blk_geom->sqi_mds;
+     else
+diff --git a/Source/Lib/Codec/rd_cost.c b/Source/Lib/Codec/rd_cost.c
+index e509249b..84a89481 100644
+--- a/Source/Lib/Codec/rd_cost.c
++++ b/Source/Lib/Codec/rd_cost.c
+@@ -1886,13 +1886,23 @@ static uint64_t cost_selected_tx_size(const MacroBlockD *xd, MdRateEstimationCon
+ 
+ /* Get the TXS rate and update the txfm context.  If allow_update_cdf is true, the TX size CDFs will
+ be updated. */
++#if FTR_LOSSLESS_SUPPORT
++uint64_t svt_aom_tx_size_bits(PictureControlSet *pcs, uint8_t segment_id, MdRateEstimationContext *md_rate_est_ctx,
++                              MacroBlockD *xd, const MbModeInfo *mbmi, TxSize tx_size, TxMode tx_mode, BlockSize bsize,
++                              uint8_t skip, FRAME_CONTEXT *ec_ctx, uint8_t allow_update_cdf) {
++#else
+ uint64_t svt_aom_tx_size_bits(MdRateEstimationContext *md_rate_est_ctx, MacroBlockD *xd, const MbModeInfo *mbmi,
+                               TxSize tx_size, TxMode tx_mode, BlockSize bsize, uint8_t skip, FRAME_CONTEXT *ec_ctx,
+                               uint8_t allow_update_cdf) {
++#endif
+     uint64_t bits        = 0;
+     int      is_inter_tx = is_inter_block(&mbmi->block_mi);
+     if (tx_mode == TX_MODE_SELECT && block_signals_txsize(bsize) &&
++#if FTR_LOSSLESS_SUPPORT
++        !(is_inter_tx && skip) && !pcs->lossless[segment_id]) {
++#else
+         !(is_inter_tx && skip) /*&& !xd->lossless[segment_id]*/) {
++#endif
+         if (is_inter_tx) { // This implies skip flag is 0.
+             const TxSize max_tx_size = get_vartx_max_txsize(/*xd,*/ bsize, 0);
+             const int    txbh        = tx_size_high_unit[max_tx_size];
+@@ -1943,7 +1953,21 @@ uint64_t svt_aom_get_tx_size_bits(ModeDecisionCandidateBuffer *candidateBuffer,
+     mbmi->block_mi.tx_depth     = tx_depth;
+ 
+     const uint64_t bits = svt_aom_tx_size_bits(
++#if FTR_LOSSLESS_SUPPORT
++        pcs,
++        ctx->blk_ptr->segment_id,
++        ctx->md_rate_est_ctx,
++        xd,
++        mbmi,
++        ctx->blk_geom->txsize[tx_depth],
++        tx_mode,
++        bsize,
++        !block_has_coeff,
++        NULL,
++        0);
++#else
+         ctx->md_rate_est_ctx, xd, mbmi, ctx->blk_geom->txsize[tx_depth], tx_mode, bsize, !block_has_coeff, NULL, 0);
++#endif
+     return bits;
+ }
+ 
+diff --git a/Source/Lib/Codec/rd_cost.h b/Source/Lib/Codec/rd_cost.h
+index ffd8e274..4ddbbceb 100644
+--- a/Source/Lib/Codec/rd_cost.h
++++ b/Source/Lib/Codec/rd_cost.h
+@@ -56,8 +56,12 @@ void svt_aom_full_cost(PictureControlSet *pcs, ModeDecisionContext *ctx, struct
+                        uint64_t cb_distortion[DIST_TOTAL][DIST_CALC_TOTAL],
+                        uint64_t cr_distortion[DIST_TOTAL][DIST_CALC_TOTAL], uint64_t *y_coeff_bits,
+                        uint64_t *cb_coeff_bits, uint64_t *cr_coeff_bits);
+-
++#if FTR_LOSSLESS_SUPPORT
++uint64_t svt_aom_tx_size_bits(PictureControlSet *pcs, uint8_t segment_id, MdRateEstimationContext *md_rate_est_ctx,
++                              MacroBlockD *xd, const MbModeInfo *mbmi,
++#else
+ uint64_t svt_aom_tx_size_bits(MdRateEstimationContext *md_rate_est_ctx, MacroBlockD *xd, const MbModeInfo *mbmi,
++#endif
+                               TxSize tx_size, TxMode tx_mode, BlockSize bsize, uint8_t skip, FRAME_CONTEXT *ec_ctx,
+                               uint8_t allow_update_cdf);
+ 
+diff --git a/Source/Lib/Codec/transforms.c b/Source/Lib/Codec/transforms.c
+index ce753649..73fc5881 100644
+--- a/Source/Lib/Codec/transforms.c
++++ b/Source/Lib/Codec/transforms.c
+@@ -3092,12 +3092,77 @@ static EbErrorType av1_estimate_transform_default(int16_t *residual_buffer, uint
+ 
+     return return_error;
+ }
++#if FTR_LOSSLESS_SUPPORT
++/* 4-point reversible, orthonormal Walsh-Hadamard in 3.5 adds, 0.5 shifts per
++   pixel.
++   Shared for both high and low bit depth.
++ */
++void svt_av1_fwht4x4_c(int16_t *input, int32_t *output, uint32_t stride) {
++    int            i;
++    int64_t        a1, b1, c1, d1, e1;
++    const int16_t *ip_pass0 = input;
++    const int32_t *ip       = NULL;
++    int32_t       *op       = output;
++
++    for (i = 0; i < 4; i++) {
++        a1 = ip_pass0[0 * stride];
++        b1 = ip_pass0[1 * stride];
++        c1 = ip_pass0[2 * stride];
++        d1 = ip_pass0[3 * stride];
++
++        a1 += b1;
++        d1 = d1 - c1;
++        e1 = (a1 - d1) >> 1;
++        b1 = e1 - b1;
++        c1 = e1 - c1;
++        a1 -= c1;
++        d1 += b1;
++        op[0] = (int32_t)a1;
++        op[1] = (int32_t)c1;
++        op[2] = (int32_t)d1;
++        op[3] = (int32_t)b1;
++
++        ip_pass0++;
++        op += 4;
++    }
++    ip = output;
++    op = output;
++
++    for (i = 0; i < 4; i++) {
++        a1 = ip[4 * 0];
++        b1 = ip[4 * 1];
++        c1 = ip[4 * 2];
++        d1 = ip[4 * 3];
++
++        a1 += b1;
++        d1 -= c1;
++        e1 = (a1 - d1) >> 1;
++        b1 = e1 - b1;
++        c1 = e1 - c1;
++        a1 -= c1;
++        d1 += b1;
++        op[4 * 0] = (int32_t)(a1 * UNIT_QUANT_FACTOR);
++        op[4 * 1] = (int32_t)(c1 * UNIT_QUANT_FACTOR);
++        op[4 * 2] = (int32_t)(d1 * UNIT_QUANT_FACTOR);
++        op[4 * 3] = (int32_t)(b1 * UNIT_QUANT_FACTOR);
++
++        ip++;
++        op++;
++    }
++}
++#endif
++
+ /*********************************************************************
+ * Transform
+ *   Note there is an implicit assumption that TU Size <= PU Size,
+ *   which is different than the HEVC requirements.
+ *********************************************************************/
++#if FTR_LOSSLESS_SUPPORT
++EbErrorType svt_aom_estimate_transform(PictureControlSet *pcs, ModeDecisionContext *ctx, int16_t *residual_buffer,
++                                       uint32_t residual_stride, int32_t *coeff_buffer,
++#else
+ EbErrorType svt_aom_estimate_transform(int16_t *residual_buffer, uint32_t residual_stride, int32_t *coeff_buffer,
++#endif
+                                        uint32_t coeff_stride, TxSize transform_size, uint64_t *three_quad_energy,
+                                        uint32_t bit_depth, TxType transform_type, PlaneType component_type,
+                                        EB_TRANS_COEFF_SHAPE trans_coeff_shape)
+@@ -3106,6 +3171,20 @@ EbErrorType svt_aom_estimate_transform(int16_t *residual_buffer, uint32_t residu
+     (void)trans_coeff_shape;
+     (void)coeff_stride;
+     (void)component_type;
++
++#if FTR_LOSSLESS_SUPPORT
++    if (pcs->lossless[ctx->blk_ptr->segment_id]) {
++        assert(transform_type == DCT_DCT);
++        int32_t dst[16];
++
++        svt_av1_fwht4x4(residual_buffer, dst, residual_stride);
++        for (int i = 0; i < 4; i++) {
++            for (int j = 0; j < 4; j++) { coeff_buffer[(j << 2) + i] = dst[(i << 2) + j]; }
++        }
++        return EB_ErrorNone;
++    }
++#endif
++
+     switch (trans_coeff_shape) {
+     case DEFAULT_SHAPE:
+         return av1_estimate_transform_default(residual_buffer,
+diff --git a/Source/Lib/Codec/transforms.h b/Source/Lib/Codec/transforms.h
+index d06493cb..ec964ef4 100644
+--- a/Source/Lib/Codec/transforms.h
++++ b/Source/Lib/Codec/transforms.h
+@@ -22,7 +22,10 @@ extern "C" {
+ #endif
+ 
+ #include "enc_dec_process.h"
+-
++#if FTR_LOSSLESS_SUPPORT
++#define UNIT_QUANT_SHIFT 2
++#define UNIT_QUANT_FACTOR (1 << UNIT_QUANT_SHIFT)
++#endif
+ static const int8_t fwd_shift_4x4[3]   = {2, 0, 0};
+ static const int8_t fwd_shift_8x8[3]   = {2, -1, 0};
+ static const int8_t fwd_shift_16x16[3] = {2, -2, 0};
+@@ -109,8 +112,12 @@ typedef struct QuantParam {
+ } QuantParam;
+ 
+ static const uint32_t q_func[] = {26214, 23302, 20560, 18396, 16384, 14564};
+-
++#if FTR_LOSSLESS_SUPPORT
++extern EbErrorType svt_aom_estimate_transform(PictureControlSet *pcs, ModeDecisionContext *ctx,
++                                              int16_t *residual_buffer, uint32_t residual_stride, int32_t *coeff_buffer,
++#else
+ extern EbErrorType svt_aom_estimate_transform(int16_t *residual_buffer, uint32_t residual_stride, int32_t *coeff_buffer,
++#endif
+                                               uint32_t coeff_stride, TxSize transform_size, uint64_t *three_quad_energy,
+                                               uint32_t bit_depth, TxType transform_type, PlaneType component_type,
+                                               EB_TRANS_COEFF_SHAPE trans_coeff_shape);
+@@ -130,6 +137,9 @@ void svt_av1_wht_fwd_txfm(int16_t *src_diff, int bw, int32_t *coeff, TxSize tx_s
+ 
+ TxfmFunc svt_aom_fwd_txfm_type_to_func(TxfmType txfmtype);
+ 
++#if FTR_LOSSLESS_SUPPORT
++void av1_fwht4x4_c(int16_t *input, int32_t *output, uint32_t stride);
++#endif
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Source/Lib/Globals/enc_handle.c b/Source/Lib/Globals/enc_handle.c
+index 62a3c037..af03bdc0 100644
+--- a/Source/Lib/Globals/enc_handle.c
++++ b/Source/Lib/Globals/enc_handle.c
+@@ -3674,7 +3674,11 @@ static void derive_vq_params(SequenceControlSet* scs) {
+ static void derive_tf_params(SequenceControlSet *scs) {
+     const EbInputResolution resolution = scs->input_resolution;
+     // Do not perform TF if LD or 1 Layer or 1st pass
++#if FTR_LOSSLESS_SUPPORT
++    Bool do_tf = scs->static_config.enable_tf && scs->static_config.hierarchical_levels >= 1 && !scs->static_config.lossless;
++#else
+     Bool do_tf = scs->static_config.enable_tf && scs->static_config.hierarchical_levels >= 1;
++#endif
+     const EncMode enc_mode = scs->static_config.enc_mode;
+     const uint32_t hierarchical_levels = scs->static_config.hierarchical_levels;
+     uint8_t tf_level = 0;
+@@ -4674,6 +4678,28 @@ static void copy_api_from_app(
+     }
+     memcpy(scs->static_config.chroma_qindex_offsets, config_struct->chroma_qindex_offsets,
+         MAX_TEMPORAL_LAYERS * sizeof(int32_t));
++
++#if FTR_LOSSLESS_SUPPORT
++    scs->static_config.lossless = config_struct->lossless;
++    if (scs->static_config.lossless) {
++        scs->static_config.luma_y_dc_qindex_offset   = 0;
++        scs->static_config.chroma_u_dc_qindex_offset = 0;
++        scs->static_config.chroma_u_ac_qindex_offset = 0;
++        scs->static_config.chroma_v_dc_qindex_offset = 0;
++        scs->static_config.chroma_v_ac_qindex_offset = 0;
++    } else {
++        scs->static_config.luma_y_dc_qindex_offset =
++            ((EbSvtAv1EncConfiguration*)config_struct)->luma_y_dc_qindex_offset;
++        scs->static_config.chroma_u_dc_qindex_offset =
++            ((EbSvtAv1EncConfiguration*)config_struct)->chroma_u_dc_qindex_offset;
++        scs->static_config.chroma_u_ac_qindex_offset =
++            ((EbSvtAv1EncConfiguration*)config_struct)->chroma_u_ac_qindex_offset;
++        scs->static_config.chroma_v_dc_qindex_offset =
++            ((EbSvtAv1EncConfiguration*)config_struct)->chroma_v_dc_qindex_offset;
++        scs->static_config.chroma_v_ac_qindex_offset =
++            ((EbSvtAv1EncConfiguration*)config_struct)->chroma_v_ac_qindex_offset;
++    }
++#else
+     scs->static_config.luma_y_dc_qindex_offset =
+       ((EbSvtAv1EncConfiguration*)config_struct)->luma_y_dc_qindex_offset;
+     scs->static_config.chroma_u_dc_qindex_offset =
+@@ -4684,7 +4710,7 @@ static void copy_api_from_app(
+       ((EbSvtAv1EncConfiguration*)config_struct)->chroma_v_dc_qindex_offset;
+     scs->static_config.chroma_v_ac_qindex_offset =
+       ((EbSvtAv1EncConfiguration*)config_struct)->chroma_v_ac_qindex_offset;
+-
++#endif
+     memcpy(scs->static_config.lambda_scale_factors, config_struct->lambda_scale_factors,
+         SVT_AV1_FRAME_UPDATE_TYPES * sizeof(int32_t));
+ 
+@@ -4746,7 +4772,14 @@ static void copy_api_from_app(
+ 
+     // Rate Control
+     scs->static_config.scene_change_detection = ((EbSvtAv1EncConfiguration*)config_struct)->scene_change_detection;
++#if FTR_LOSSLESS_SUPPORT
++    if (((EbSvtAv1EncConfiguration*)config_struct)->lossless && ((EbSvtAv1EncConfiguration*)config_struct)->rate_control_mode) {
++        scs->static_config.rate_control_mode = SVT_AV1_RC_MODE_CQP_OR_CRF;
++        SVT_WARN("Switched to CQP mode since lossless coding is enabled\n");
++    } else
++#endif
+     scs->static_config.rate_control_mode = ((EbSvtAv1EncConfiguration*)config_struct)->rate_control_mode;
++
+     if (scs->static_config.pass == ENC_SINGLE_PASS && scs->static_config.pred_structure == SVT_AV1_PRED_LOW_DELAY_B) {
+ 
+         if (scs->static_config.enc_mode < ENC_M7) {
+@@ -4785,6 +4818,22 @@ static void copy_api_from_app(
+         scs->static_config.max_bit_rate = 0;
+         SVT_WARN("Maximum bit rate only supported with tpl on. max bit rate 0 is used instead.\n");
+     }
++
++
++#if FTR_LOSSLESS_SUPPORT
++    scs->static_config.max_qp_allowed = scs->static_config.lossless
++        ? MIN_QP_VALUE
++        : scs->static_config.rate_control_mode
++            ? ((EbSvtAv1EncConfiguration*)config_struct)->max_qp_allowed
++            : MAX_QP_VALUE;
++
++    scs->static_config.min_qp_allowed = scs->static_config.lossless
++        ? MIN_QP_VALUE
++        : scs->static_config.rate_control_mode
++            ? ((EbSvtAv1EncConfiguration*)config_struct)->min_qp_allowed
++            : MIN_QP_VALUE;
++
++#else
+     scs->static_config.max_qp_allowed = (scs->static_config.rate_control_mode) ?
+         ((EbSvtAv1EncConfiguration*)config_struct)->max_qp_allowed :
+         63;
+@@ -4793,6 +4842,7 @@ static void copy_api_from_app(
+         (((EbSvtAv1EncConfiguration*)config_struct)->min_qp_allowed > 0) ?
+         ((EbSvtAv1EncConfiguration*)config_struct)->min_qp_allowed : 1 :
+         1; // lossless coding not supported
++#endif
+ #if !SVT_AV1_CHECK_VERSION(2, 0, 0)
+     scs->static_config.vbr_bias_pct        = ((EbSvtAv1EncConfiguration*)config_struct)->vbr_bias_pct;
+ #endif
+@@ -4822,8 +4872,13 @@ static void copy_api_from_app(
+         scs->lap_rc = 0;
+     //Segmentation
+     //TODO: check RC mode and set only when RC is enabled in the final version.
++#if FTR_LOSSLESS_SUPPORT
++    scs->static_config.enable_adaptive_quantization = scs->static_config.lossless
++        ? 0
++        : config_struct->enable_adaptive_quantization;
++#else
+     scs->static_config.enable_adaptive_quantization = config_struct->enable_adaptive_quantization;
+-
++#endif
+     // Misc
+     scs->static_config.encoder_bit_depth = ((EbSvtAv1EncConfiguration*)config_struct)->encoder_bit_depth;
+     scs->static_config.encoder_color_format = ((EbSvtAv1EncConfiguration*)config_struct)->encoder_color_format;
+@@ -4961,6 +5016,7 @@ static void copy_api_from_app(
+     scs->static_config.enable_variance_boost = config_struct->enable_variance_boost;
+     scs->static_config.variance_boost_strength = config_struct->variance_boost_strength;
+     scs->static_config.variance_octile = config_struct->variance_octile;
++
+     return;
+ }
+ 
+diff --git a/Source/Lib/Globals/enc_settings.c b/Source/Lib/Globals/enc_settings.c
+index b8652b1a..82ca34d3 100644
+--- a/Source/Lib/Globals/enc_settings.c
++++ b/Source/Lib/Globals/enc_settings.c
+@@ -322,11 +322,13 @@ EbErrorType svt_av1_verify_settings(SequenceControlSet *scs) {
+     } else if ((config->min_qp_allowed) > (config->max_qp_allowed)) {
+         SVT_ERROR("Instance %u:  MinQpAllowed must be smaller than MaxQpAllowed\n", channel_number + 1);
+         return_error = EB_ErrorBadParameter;
++#if !FTR_LOSSLESS_SUPPORT
+     } else if ((config->min_qp_allowed) == 0) {
+         SVT_ERROR("Instance %u: MinQpAllowed must be [1 - %d]. Lossless coding not supported\n",
+                   channel_number + 1,
+                   MAX_QP_VALUE - 1);
+         return_error = EB_ErrorBadParameter;
++#endif
+     }
+     if (config->use_qp_file > 1) {
+         SVT_ERROR("Instance %u : Invalid use_qp_file. use_qp_file must be [0 - 1]\n", channel_number + 1);
+@@ -1076,35 +1078,41 @@ void svt_av1_print_lib_params(SequenceControlSet *scs) {
+             config->intra_refresh_type == SVT_AV1_FWDKF_REFRESH    ? "FWD key frame"
+                 : config->intra_refresh_type == SVT_AV1_KF_REFRESH ? "key frame"
+                                                                    : "Unknown key frame type");
+-
+-        switch (config->rate_control_mode) {
+-        case SVT_AV1_RC_MODE_CQP_OR_CRF:
+-            if (config->max_bit_rate)
++#if FTR_LOSSLESS_SUPPORT
++        if (config->lossless) {
++            SVT_INFO("SVT [config]: BRC mode\t\t\t\t\t\t\t: Lossless Coding \n");
++        } else {
++#endif
++            switch (config->rate_control_mode) {
++            case SVT_AV1_RC_MODE_CQP_OR_CRF:
++                if (config->max_bit_rate)
++                    SVT_INFO(
++                        "SVT [config]: BRC mode / %s / max bitrate (kbps)\t\t\t: %s / %d / "
++                        "%d\n",
++                        scs->tpl || scs->static_config.enable_variance_boost ? "rate factor" : "CQP Assignment",
++                        scs->tpl || scs->static_config.enable_variance_boost ? "capped CRF" : "CQP",
++                        scs->static_config.qp,
++                        (int)config->max_bit_rate / 1000);
++                else
++                    SVT_INFO("SVT [config]: BRC mode / %s \t\t\t\t\t: %s / %d \n",
++                             scs->tpl || scs->static_config.enable_variance_boost ? "rate factor" : "CQP Assignment",
++                             scs->tpl || scs->static_config.enable_variance_boost ? "CRF" : "CQP",
++                             scs->static_config.qp);
++                break;
++            case SVT_AV1_RC_MODE_VBR:
++                SVT_INFO("SVT [config]: BRC mode / target bitrate (kbps)\t\t\t\t: VBR / %d \n",
++                         (int)config->target_bit_rate / 1000);
++                break;
++            case SVT_AV1_RC_MODE_CBR:
+                 SVT_INFO(
+-                    "SVT [config]: BRC mode / %s / max bitrate (kbps)\t\t\t: %s / %d / "
+-                    "%d\n",
+-                    scs->tpl || scs->static_config.enable_variance_boost ? "rate factor" : "CQP Assignment",
+-                    scs->tpl || scs->static_config.enable_variance_boost ? "capped CRF" : "CQP",
+-                    scs->static_config.qp,
+-                    (int)config->max_bit_rate / 1000);
+-            else
+-                SVT_INFO("SVT [config]: BRC mode / %s \t\t\t\t\t: %s / %d \n",
+-                         scs->tpl || scs->static_config.enable_variance_boost ? "rate factor" : "CQP Assignment",
+-                         scs->tpl || scs->static_config.enable_variance_boost ? "CRF" : "CQP",
+-                         scs->static_config.qp);
+-            break;
+-        case SVT_AV1_RC_MODE_VBR:
+-            SVT_INFO("SVT [config]: BRC mode / target bitrate (kbps)\t\t\t\t: VBR / %d \n",
+-                     (int)config->target_bit_rate / 1000);
+-            break;
+-        case SVT_AV1_RC_MODE_CBR:
+-            SVT_INFO(
+-                "SVT [config]: BRC mode / target bitrate (kbps)\t\t\t\t: CBR "
+-                "/ %d\n",
+-                (int)config->target_bit_rate / 1000);
+-            break;
++                    "SVT [config]: BRC mode / target bitrate (kbps)\t\t\t\t: CBR "
++                    "/ %d\n",
++                    (int)config->target_bit_rate / 1000);
++                break;
++            }
++#if FTR_LOSSLESS_SUPPORT
+         }
+-
++#endif
+         if (config->rate_control_mode != SVT_AV1_RC_MODE_CBR) {
+             if (!config->enable_variance_boost) {
+                 SVT_INFO("SVT [config]: AQ mode / variance boost \t\t\t\t\t: %d / %d\n",
+@@ -1977,6 +1985,9 @@ EB_API EbErrorType svt_av1_enc_parse_parameter(EbSvtAv1EncConfiguration *config_
+         {"variance-boost-strength", &config_struct->variance_boost_strength},
+         {"variance-octile", &config_struct->variance_octile},
+         {"fast-decode", &config_struct->fast_decode},
++#if FTR_LOSSLESS_SUPPORT
++        {"lossless", &config_struct->lossless},
++#endif
+     };
+     const size_t uint8_opts_size = sizeof(uint8_opts) / sizeof(uint8_opts[0]);
+ 
+-- 
+2.36.0.windows.1
+

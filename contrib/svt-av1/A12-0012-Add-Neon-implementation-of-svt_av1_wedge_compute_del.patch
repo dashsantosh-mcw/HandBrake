@@ -1,0 +1,99 @@
+From ae1051aecda99fffa1c2bbae3e59dc3285938a12 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Sat, 12 Oct 2024 21:56:03 +0100
+Subject: [PATCH 12/56] Add Neon implementation of
+ svt_av1_wedge_compute_delta_squares
+
+Port the libaom Neon implementation of
+svt_av1_wedge_compute_delta_squares and add the corresponding unit
+tests.
+---
+ Source/Lib/ASM_NEON/wedge_utils_neon.c | 22 ++++++++++++++++++++++
+ Source/Lib/Codec/aom_dsp_rtcd.c        |  2 +-
+ Source/Lib/Codec/aom_dsp_rtcd.h        |  1 +
+ test/WedgeUtilTest.cc                  |  7 ++++++-
+ 4 files changed, 30 insertions(+), 2 deletions(-)
+
+diff --git a/Source/Lib/ASM_NEON/wedge_utils_neon.c b/Source/Lib/ASM_NEON/wedge_utils_neon.c
+index fb61b19d..6363e8ad 100644
+--- a/Source/Lib/ASM_NEON/wedge_utils_neon.c
++++ b/Source/Lib/ASM_NEON/wedge_utils_neon.c
+@@ -104,3 +104,25 @@ int8_t svt_av1_wedge_sign_from_residuals_neon(const int16_t *ds, const uint8_t *
+ 
+     return (vaddvq_s64(sum) > limit);
+ }
++
++void svt_av1_wedge_compute_delta_squares_neon(int16_t *d_ptr, const int16_t *a_ptr, const int16_t *b_ptr, int N) {
++    do {
++        int16x8_t a = vld1q_s16(a_ptr);
++        int16x8_t b = vld1q_s16(b_ptr);
++
++        int32x4_t sq_lo = vmull_s16(vget_low_s16(a), vget_low_s16(a));
++        int32x4_t sq_hi = vmull_s16(vget_high_s16(a), vget_high_s16(a));
++
++        sq_lo = vmlsl_s16(sq_lo, vget_low_s16(b), vget_low_s16(b));
++        sq_hi = vmlsl_s16(sq_hi, vget_high_s16(b), vget_high_s16(b));
++
++        int16x8_t res = vcombine_s16(vqmovn_s32(sq_lo), vqmovn_s32(sq_hi));
++
++        vst1q_s16(d_ptr, res);
++
++        d_ptr += 8;
++        a_ptr += 8;
++        b_ptr += 8;
++        N -= 8;
++    } while (N != 0);
++}
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.c b/Source/Lib/Codec/aom_dsp_rtcd.c
+index 22192f83..11d3d58c 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.c
++++ b/Source/Lib/Codec/aom_dsp_rtcd.c
+@@ -551,7 +551,7 @@ void svt_aom_setup_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(hadamard_path, hadamard_path_c, hadamard_path_neon);
+     SET_NEON(svt_aom_sse, svt_aom_sse_c, svt_aom_sse_neon);
+     SET_NEON(svt_aom_highbd_sse, svt_aom_highbd_sse_c, svt_aom_highbd_sse_neon);
+-    SET_ONLY_C(svt_av1_wedge_compute_delta_squares, svt_av1_wedge_compute_delta_squares_c);
++    SET_NEON(svt_av1_wedge_compute_delta_squares, svt_av1_wedge_compute_delta_squares_c, svt_av1_wedge_compute_delta_squares_neon);
+     SET_NEON(svt_av1_wedge_sign_from_residuals, svt_av1_wedge_sign_from_residuals_c, svt_av1_wedge_sign_from_residuals_neon);
+     SET_NEON(svt_compute_cdef_dist_16bit, svt_aom_compute_cdef_dist_c, svt_aom_compute_cdef_dist_16bit_neon);
+     SET_NEON(svt_compute_cdef_dist_8bit, svt_aom_compute_cdef_dist_8bit_c, svt_aom_compute_cdef_dist_8bit_neon);
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.h b/Source/Lib/Codec/aom_dsp_rtcd.h
+index 1af6e719..d5d0e958 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.h
++++ b/Source/Lib/Codec/aom_dsp_rtcd.h
+@@ -1251,6 +1251,7 @@ extern "C" {
+     int64_t svt_aom_highbd_sse_neon(const uint8_t *a8, int a_stride, const uint8_t *b8, int b_stride, int width, int height);
+     int64_t svt_av1_block_error_neon(const TranLow *coeff, const TranLow *dqcoeff, intptr_t block_size, int64_t *ssz);
+     int8_t svt_av1_wedge_sign_from_residuals_neon(const int16_t *ds, const uint8_t *m, int N, int64_t limit);
++    void svt_av1_wedge_compute_delta_squares_neon(int16_t *d, const int16_t *a, const int16_t *b, int N);
+     uint32_t hadamard_path_neon(Buf2D residualBuf, Buf2D coeffBuf, Buf2D inputBuf, Buf2D predBuf, BlockSize bsize);
+ 
+     void svt_aom_get_final_filtered_pixels_neon(struct MeContext *me_ctx, EbByte *src_center_ptr_start, uint16_t **altref_buffer_highbd_start, uint32_t **accum, uint16_t **count, const uint32_t *stride, int blk_y_src_offset, int blk_ch_src_offset, uint16_t blk_width_ch, uint16_t blk_height_ch, Bool is_highbd);
+diff --git a/test/WedgeUtilTest.cc b/test/WedgeUtilTest.cc
+index 0594376a..7e91b8b6 100644
+--- a/test/WedgeUtilTest.cc
++++ b/test/WedgeUtilTest.cc
+@@ -229,7 +229,6 @@ class WedgeComputeDeltaSquaresTest
+ 
+     WedgeComputeDeltaSquaresFunc test_func_;
+ };
+-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(WedgeComputeDeltaSquaresTest);
+ 
+ // element-by-element calculate the difference of square
+ TEST_P(WedgeComputeDeltaSquaresTest, ComputeDeltaSquareTest) {
+@@ -242,6 +241,12 @@ INSTANTIATE_TEST_SUITE_P(
+     ::testing::Values(svt_av1_wedge_compute_delta_squares_avx2));
+ #endif  // ARCH_X86_64
+ 
++#if ARCH_AARCH64
++INSTANTIATE_TEST_SUITE_P(
++    NEON, WedgeComputeDeltaSquaresTest,
++    ::testing::Values(svt_av1_wedge_compute_delta_squares_neon));
++#endif  // ARCH_AARCH64
++
+ // test svt_av1_wedge_sse_from_residuals
+ using WedgeSseFromResidualsFunc = uint64_t (*)(const int16_t *r1,
+                                                const int16_t *d,
+-- 
+2.36.0.windows.1
+

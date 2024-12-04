@@ -1,0 +1,279 @@
+From 1bc8869e4a29719fd47ec509f5ea427a87e2d79b Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Tue, 15 Oct 2024 10:13:37 +0100
+Subject: [PATCH 47/56] Add Neon implementation of highbd_h_predictor functions
+
+Port the libaom Neon implementations of svt_aom_highbd_h_predictor
+functions and add the corresponding unit tests.
+---
+ .../ASM_NEON/highbd_intra_prediction_neon.c   | 151 ++++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c            |  39 ++---
+ Source/Lib/Codec/common_dsp_rtcd.h            |  20 +++
+ test/intrapred_test.cc                        |  11 +-
+ 4 files changed, 201 insertions(+), 20 deletions(-)
+
+diff --git a/Source/Lib/ASM_NEON/highbd_intra_prediction_neon.c b/Source/Lib/ASM_NEON/highbd_intra_prediction_neon.c
+index 3848371b..fdc73656 100644
+--- a/Source/Lib/ASM_NEON/highbd_intra_prediction_neon.c
++++ b/Source/Lib/ASM_NEON/highbd_intra_prediction_neon.c
+@@ -718,3 +718,154 @@ HIGHBD_V_NXM(32, 64)
+ HIGHBD_V_NXM(64, 16)
+ HIGHBD_V_NXM(64, 32)
+ HIGHBD_V_NXM(64, 64)
++
++// -----------------------------------------------------------------------------
++// H_PRED
++
++static INLINE void highbd_h_store_4x4(uint16_t *dst, ptrdiff_t stride, uint16x4_t left) {
++    vst1_u16(dst + 0 * stride, vdup_lane_u16(left, 0));
++    vst1_u16(dst + 1 * stride, vdup_lane_u16(left, 1));
++    vst1_u16(dst + 2 * stride, vdup_lane_u16(left, 2));
++    vst1_u16(dst + 3 * stride, vdup_lane_u16(left, 3));
++}
++
++static INLINE void highbd_h_store_8x4(uint16_t *dst, ptrdiff_t stride, uint16x4_t left) {
++    vst1q_u16(dst + 0 * stride, vdupq_lane_u16(left, 0));
++    vst1q_u16(dst + 1 * stride, vdupq_lane_u16(left, 1));
++    vst1q_u16(dst + 2 * stride, vdupq_lane_u16(left, 2));
++    vst1q_u16(dst + 3 * stride, vdupq_lane_u16(left, 3));
++}
++
++static INLINE void highbd_h_store_16x1(uint16_t *dst, uint16x8_t left) {
++    vst1q_u16(dst + 0, left);
++    vst1q_u16(dst + 8, left);
++}
++
++static INLINE void highbd_h_store_16x4(uint16_t *dst, ptrdiff_t stride, uint16x4_t left) {
++    highbd_h_store_16x1(dst + 0 * stride, vdupq_lane_u16(left, 0));
++    highbd_h_store_16x1(dst + 1 * stride, vdupq_lane_u16(left, 1));
++    highbd_h_store_16x1(dst + 2 * stride, vdupq_lane_u16(left, 2));
++    highbd_h_store_16x1(dst + 3 * stride, vdupq_lane_u16(left, 3));
++}
++
++static INLINE void highbd_h_store_32x1(uint16_t *dst, uint16x8_t left) {
++    vst1q_u16(dst + 0, left);
++    vst1q_u16(dst + 8, left);
++    vst1q_u16(dst + 16, left);
++    vst1q_u16(dst + 24, left);
++}
++
++static INLINE void highbd_h_store_32x4(uint16_t *dst, ptrdiff_t stride, uint16x4_t left) {
++    highbd_h_store_32x1(dst + 0 * stride, vdupq_lane_u16(left, 0));
++    highbd_h_store_32x1(dst + 1 * stride, vdupq_lane_u16(left, 1));
++    highbd_h_store_32x1(dst + 2 * stride, vdupq_lane_u16(left, 2));
++    highbd_h_store_32x1(dst + 3 * stride, vdupq_lane_u16(left, 3));
++}
++
++static INLINE void highbd_h_store_64x1(uint16_t *dst, uint16x8_t left) {
++    vst1q_u16(dst + 0, left);
++    vst1q_u16(dst + 8, left);
++    vst1q_u16(dst + 16, left);
++    vst1q_u16(dst + 24, left);
++    vst1q_u16(dst + 32, left);
++    vst1q_u16(dst + 40, left);
++    vst1q_u16(dst + 48, left);
++    vst1q_u16(dst + 56, left);
++}
++
++static INLINE void highbd_h_store_64x4(uint16_t *dst, ptrdiff_t stride, uint16x4_t left) {
++    highbd_h_store_64x1(dst + 0 * stride, vdupq_lane_u16(left, 0));
++    highbd_h_store_64x1(dst + 1 * stride, vdupq_lane_u16(left, 1));
++    highbd_h_store_64x1(dst + 2 * stride, vdupq_lane_u16(left, 2));
++    highbd_h_store_64x1(dst + 3 * stride, vdupq_lane_u16(left, 3));
++}
++
++void svt_aom_highbd_h_predictor_4x4_neon(uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left,
++                                         int bd) {
++    (void)above;
++    (void)bd;
++    highbd_h_store_4x4(dst, stride, vld1_u16(left));
++}
++
++void svt_aom_highbd_h_predictor_4x8_neon(uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left,
++                                         int bd) {
++    (void)above;
++    (void)bd;
++    uint16x8_t l = vld1q_u16(left);
++    highbd_h_store_4x4(dst + 0 * stride, stride, vget_low_u16(l));
++    highbd_h_store_4x4(dst + 4 * stride, stride, vget_high_u16(l));
++}
++
++void svt_aom_highbd_h_predictor_8x4_neon(uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left,
++                                         int bd) {
++    (void)above;
++    (void)bd;
++    highbd_h_store_8x4(dst, stride, vld1_u16(left));
++}
++
++void svt_aom_highbd_h_predictor_8x8_neon(uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left,
++                                         int bd) {
++    (void)above;
++    (void)bd;
++    uint16x8_t l = vld1q_u16(left);
++    highbd_h_store_8x4(dst + 0 * stride, stride, vget_low_u16(l));
++    highbd_h_store_8x4(dst + 4 * stride, stride, vget_high_u16(l));
++}
++
++void svt_aom_highbd_h_predictor_16x4_neon(uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left,
++                                          int bd) {
++    (void)above;
++    (void)bd;
++    highbd_h_store_16x4(dst, stride, vld1_u16(left));
++}
++
++void svt_aom_highbd_h_predictor_16x8_neon(uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left,
++                                          int bd) {
++    (void)above;
++    (void)bd;
++    uint16x8_t l = vld1q_u16(left);
++    highbd_h_store_16x4(dst + 0 * stride, stride, vget_low_u16(l));
++    highbd_h_store_16x4(dst + 4 * stride, stride, vget_high_u16(l));
++}
++
++void svt_aom_highbd_h_predictor_32x8_neon(uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left,
++                                          int bd) {
++    (void)above;
++    (void)bd;
++    uint16x8_t l = vld1q_u16(left);
++    highbd_h_store_32x4(dst + 0 * stride, stride, vget_low_u16(l));
++    highbd_h_store_32x4(dst + 4 * stride, stride, vget_high_u16(l));
++}
++
++// For cases where height >= 16 we use pairs of loads to get LDP instructions.
++#define HIGHBD_H_WXH_LARGE(w, h)                                                                \
++    void svt_aom_highbd_h_predictor_##w##x##h##_neon(                                           \
++        uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left, int bd) { \
++        (void)above;                                                                            \
++        (void)bd;                                                                               \
++        for (int i = 0; i < (h) / 16; ++i) {                                                    \
++            uint16x8_t l0 = vld1q_u16(left + 0);                                                \
++            uint16x8_t l1 = vld1q_u16(left + 8);                                                \
++            highbd_h_store_##w##x4(dst + 0 * stride, stride, vget_low_u16(l0));                 \
++            highbd_h_store_##w##x4(dst + 4 * stride, stride, vget_high_u16(l0));                \
++            highbd_h_store_##w##x4(dst + 8 * stride, stride, vget_low_u16(l1));                 \
++            highbd_h_store_##w##x4(dst + 12 * stride, stride, vget_high_u16(l1));               \
++            left += 16;                                                                         \
++            dst += 16 * stride;                                                                 \
++        }                                                                                       \
++    }
++
++HIGHBD_H_WXH_LARGE(4, 16)
++HIGHBD_H_WXH_LARGE(8, 16)
++HIGHBD_H_WXH_LARGE(8, 32)
++HIGHBD_H_WXH_LARGE(16, 16)
++HIGHBD_H_WXH_LARGE(16, 32)
++HIGHBD_H_WXH_LARGE(16, 64)
++HIGHBD_H_WXH_LARGE(32, 16)
++HIGHBD_H_WXH_LARGE(32, 32)
++HIGHBD_H_WXH_LARGE(32, 64)
++HIGHBD_H_WXH_LARGE(64, 16)
++HIGHBD_H_WXH_LARGE(64, 32)
++HIGHBD_H_WXH_LARGE(64, 64)
++
++#undef HIGHBD_H_WXH_LARGE
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index e8f9b8f3..000bfe67 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1497,25 +1497,26 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_ONLY_C(svt_aom_highbd_dc_top_predictor_64x64, svt_aom_highbd_dc_top_predictor_64x64_c);
+ 
+     // svt_aom_highbd_h_predictor
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_4x4, svt_aom_highbd_h_predictor_4x4_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_4x8, svt_aom_highbd_h_predictor_4x8_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_4x16, svt_aom_highbd_h_predictor_4x16_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_8x4, svt_aom_highbd_h_predictor_8x4_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_8x8, svt_aom_highbd_h_predictor_8x8_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_8x16, svt_aom_highbd_h_predictor_8x16_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_8x32, svt_aom_highbd_h_predictor_8x32_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_16x4, svt_aom_highbd_h_predictor_16x4_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_16x8, svt_aom_highbd_h_predictor_16x8_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_16x16, svt_aom_highbd_h_predictor_16x16_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_16x32, svt_aom_highbd_h_predictor_16x32_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_16x64, svt_aom_highbd_h_predictor_16x64_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_32x8, svt_aom_highbd_h_predictor_32x8_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_32x16, svt_aom_highbd_h_predictor_32x16_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_32x32, svt_aom_highbd_h_predictor_32x32_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_32x64, svt_aom_highbd_h_predictor_32x64_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_64x16, svt_aom_highbd_h_predictor_64x16_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_64x32, svt_aom_highbd_h_predictor_64x32_c);
+-    SET_ONLY_C(svt_aom_highbd_h_predictor_64x64, svt_aom_highbd_h_predictor_64x64_c);
++    SET_NEON(svt_aom_highbd_h_predictor_4x4, svt_aom_highbd_h_predictor_4x4_c, svt_aom_highbd_h_predictor_4x4_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_4x8, svt_aom_highbd_h_predictor_4x8_c, svt_aom_highbd_h_predictor_4x8_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_4x16, svt_aom_highbd_h_predictor_4x16_c, svt_aom_highbd_h_predictor_4x16_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_8x4, svt_aom_highbd_h_predictor_8x4_c, svt_aom_highbd_h_predictor_8x4_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_8x8, svt_aom_highbd_h_predictor_8x8_c, svt_aom_highbd_h_predictor_8x8_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_8x16, svt_aom_highbd_h_predictor_8x16_c, svt_aom_highbd_h_predictor_8x16_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_8x32, svt_aom_highbd_h_predictor_8x32_c, svt_aom_highbd_h_predictor_8x32_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_16x4, svt_aom_highbd_h_predictor_16x4_c, svt_aom_highbd_h_predictor_16x4_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_16x8, svt_aom_highbd_h_predictor_16x8_c, svt_aom_highbd_h_predictor_16x8_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_16x16, svt_aom_highbd_h_predictor_16x16_c, svt_aom_highbd_h_predictor_16x16_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_16x32, svt_aom_highbd_h_predictor_16x32_c, svt_aom_highbd_h_predictor_16x32_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_16x64, svt_aom_highbd_h_predictor_16x64_c, svt_aom_highbd_h_predictor_16x64_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_32x8, svt_aom_highbd_h_predictor_32x8_c, svt_aom_highbd_h_predictor_32x8_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_32x16, svt_aom_highbd_h_predictor_32x16_c, svt_aom_highbd_h_predictor_32x16_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_32x32, svt_aom_highbd_h_predictor_32x32_c, svt_aom_highbd_h_predictor_32x32_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_32x64, svt_aom_highbd_h_predictor_32x64_c, svt_aom_highbd_h_predictor_32x64_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_64x16, svt_aom_highbd_h_predictor_64x16_c, svt_aom_highbd_h_predictor_64x16_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_64x32, svt_aom_highbd_h_predictor_64x32_c, svt_aom_highbd_h_predictor_64x32_neon);
++    SET_NEON(svt_aom_highbd_h_predictor_64x64, svt_aom_highbd_h_predictor_64x64_c, svt_aom_highbd_h_predictor_64x64_c);
++
+     SET_ONLY_C(svt_log2f, svt_aom_log2f_32);
+     SET_ONLY_C(svt_memcpy, svt_memcpy_c);
+     SET_NEON(svt_aom_hadamard_32x32, svt_aom_hadamard_32x32_c, svt_aom_hadamard_32x32_neon);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index a5b76bd3..11cdb7bf 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1281,6 +1281,26 @@ extern "C" {
+     void svt_aom_highbd_v_predictor_64x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
+     void svt_aom_highbd_v_predictor_64x64_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
+ 
++    void svt_aom_highbd_h_predictor_4x4_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_4x8_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_4x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_8x4_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_8x8_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_8x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_8x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_16x4_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_16x8_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_16x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_16x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_16x64_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_32x8_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_32x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_32x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_32x64_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_64x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_64x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_h_predictor_64x64_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++
+     void svt_aom_lpf_vertical_4_neon(uint8_t *src, int stride, const uint8_t *blimit, const uint8_t *limit, const uint8_t *thresh);
+     void svt_aom_lpf_vertical_6_neon(uint8_t *src, int stride, const uint8_t *blimit, const uint8_t *limit, const uint8_t *thresh);
+     void svt_aom_lpf_vertical_8_neon(uint8_t *src, int stride, const uint8_t *blimit, const uint8_t *limit, const uint8_t *thresh);
+diff --git a/test/intrapred_test.cc b/test/intrapred_test.cc
+index 12455b42..9276cf58 100644
+--- a/test/intrapred_test.cc
++++ b/test/intrapred_test.cc
+@@ -352,7 +352,16 @@ const HBD_PARAMS HighbdIntraPredTestVectorAsmNEON[] = {
+     hbd_entry(v, 16, 64, neon),        hbd_entry(v, 32, 8, neon),
+     hbd_entry(v, 32, 16, neon),        hbd_entry(v, 32, 32, neon),
+     hbd_entry(v, 32, 64, neon),        hbd_entry(v, 64, 16, neon),
+-    hbd_entry(v, 64, 32, neon),        hbd_entry(v, 64, 64, neon)};
++    hbd_entry(v, 64, 32, neon),        hbd_entry(v, 64, 64, neon),
++    hbd_entry(h, 4, 8, neon),          hbd_entry(h, 4, 16, neon),
++    hbd_entry(h, 8, 4, neon),          hbd_entry(h, 8, 8, neon),
++    hbd_entry(h, 8, 16, neon),         hbd_entry(h, 8, 32, neon),
++    hbd_entry(h, 16, 4, neon),         hbd_entry(h, 16, 8, neon),
++    hbd_entry(h, 16, 16, neon),        hbd_entry(h, 16, 32, neon),
++    hbd_entry(h, 16, 64, neon),        hbd_entry(h, 32, 8, neon),
++    hbd_entry(h, 32, 16, neon),        hbd_entry(h, 32, 32, neon),
++    hbd_entry(h, 32, 64, neon),        hbd_entry(h, 64, 16, neon),
++    hbd_entry(h, 64, 32, neon),        hbd_entry(h, 64, 64, neon)};
+ 
+ INSTANTIATE_TEST_SUITE_P(NEON, HighbdIntraPredTest,
+                          ::testing::ValuesIn(HighbdIntraPredTestVectorAsmNEON));
+-- 
+2.36.0.windows.1
+

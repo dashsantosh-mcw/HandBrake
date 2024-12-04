@@ -1,0 +1,109 @@
+From 3b4d426de27add957d6c862b1bfb446c08e8d1f7 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Wed, 27 Nov 2024 07:50:19 -0800
+Subject: [PATCH] Enable Neon DotProd and I8MM in SVT-AV1 for Windows On ARM
+
+---
+ Source/Lib/Codec/common_dsp_rtcd.c | 79 +++++++++++++++++++++++++++++-
+ 1 file changed, 78 insertions(+), 1 deletion(-)
+
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index 00525585..c5907260 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -230,7 +230,83 @@ EbCpuFlags svt_aom_get_cpu_flags(void) {
+   return flags;
+ }
+ 
+-#else // end _MSC_VER
++#elif defined(__MINGW64__) // Windows+Aarch64
++
++#include <windows.h>
++
++int checkSnapdragon()
++{
++    char processorName[128];
++    DWORD bufferSize = sizeof(processorName);
++    LONG result = RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", "ProcessorNameString", RRF_RT_ANY, NULL, (PVOID)processorName, &bufferSize);
++    if (strstr(processorName, "Snapdragon") != NULL)
++    {
++        return 1;
++    }
++    else
++    {
++        return 0;
++    }
++}
++
++EbCpuFlags svt_aom_get_cpu_flags(void) {
++  EbCpuFlags flags = EB_CPU_FLAGS_NEON;
++#if HAVE_ARM_CRC32
++  if (IsProcessorFeaturePresent(PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE)) {
++    flags |= EB_CPU_FLAGS_ARM_CRC32;
++  }
++#endif
++#if HAVE_NEON_DOTPROD
++// Support for PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE was added in Windows SDK
++// 20348, supported by Windows 11 and Windows Server 2022.
++#if defined(PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE)
++    if (IsProcessorFeaturePresent(PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE))
++    {
++        flags |= EB_CPU_FLAGS_NEON_DOTPROD;
++    }
++#endif // defined(PF_ARM_V82_DP_INSTRUCTIONS_AVAILABLE)
++#endif // HAVE_NEON_DOTPROD
++#if HAVE_NEON_I8MM
++/* TODO: Remove checkSnapdragon() once PF_ARM_SVE_I8MM_INSTRUCTIONS_AVAILABLE is available for XElite devices
++// Support for PF_ARM_SVE_I8MM_INSTRUCTIONS_AVAILABLE was added in Windows SDK
++// 26100.
++#if defined(PF_ARM_SVE_I8MM_INSTRUCTIONS_AVAILABLE)
++    // There's no PF_* flag yet that indicates whether Neon I8MM is available
++    // or not. But if SVE_I8MM is available, that also implies that Neon I8MM
++    // is available.
++    if (IsProcessorFeaturePresent(PF_ARM_SVE_I8MM_INSTRUCTIONS_AVAILABLE))
++    {
++        flags |= EB_CPU_FLAGS_NEON_I8MM;
++    }*/
++    if (checkSnapdragon())
++       {
++            flags |= EB_CPU_FLAGS_NEON_I8MM;
++       }
++//#endif  // defined(PF_ARM_SVE_I8MM_INSTRUCTIONS_AVAILABLE)
++//#endif  // HAVE_NEON_I8MM
++#if HAVE_SVE
++// Support for PF_ARM_SVE_INSTRUCTIONS_AVAILABLE was added in Windows SDK 26100.
++#if defined(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE)
++    if (IsProcessorFeaturePresent(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE))
++    {
++        flags |= EB_CPU_FLAGS_SVE;
++    }
++#endif  // defined(PF_ARM_SVE_INSTRUCTIONS_AVAILABLE)
++#endif  // HAVE_SVE
++#if HAVE_SVE2
++// Support for PF_ARM_SVE2_INSTRUCTIONS_AVAILABLE was added in Windows SDK
++// 26100.
++#if defined(PF_ARM_SVE2_INSTRUCTIONS_AVAILABLE)
++    if (IsProcessorFeaturePresent(PF_ARM_SVE2_INSTRUCTIONS_AVAILABLE))
++    {
++        flags |= EB_CPU_FLAGS_SVE2;
++    }
++#endif  // defined(PF_ARM_SVE2_INSTRUCTIONS_AVAILABLE)
++#endif  // HAVE_SVE2
++    return flags;
++}
++#endif // end (__MINGW64__)
++#else
+ 
+ EbCpuFlags svt_aom_get_cpu_flags() {
+     EbCpuFlags flags = 0;
+@@ -267,6 +343,7 @@ EbCpuFlags svt_aom_get_cpu_flags_to_use() {
+ #endif
+ #endif
+ 
++
+ #ifdef ARCH_X86_64
+ #if EN_AVX512_SUPPORT
+ #define SET_FUNCTIONS_AVX512(ptr, avx512)                                                         \
+-- 
+2.36.0.windows.1
+

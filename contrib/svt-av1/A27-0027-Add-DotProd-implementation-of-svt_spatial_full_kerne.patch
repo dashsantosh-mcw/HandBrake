@@ -1,0 +1,87 @@
+From 746e9e9770098d2fc5addf64e8f17f5fc378e137 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Wed, 23 Oct 2024 11:55:15 +0100
+Subject: [PATCH 27/56] Add DotProd implementation of
+ svt_spatial_full_kernel_distortion
+
+Reuse the DotProd SSE helper functions to write a DotProd implementation
+of svt_spatial_full_kernel_distortion and add the corresponding unit
+tests.
+---
+ Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c | 16 ++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c             |  2 +-
+ Source/Lib/Codec/common_dsp_rtcd.h             |  1 +
+ test/SpatialFullDistortionTest.cc              |  8 ++++++++
+ 4 files changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c b/Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c
+index 7f6d0fe4..9d2b74b4 100644
+--- a/Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c
++++ b/Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c
+@@ -199,3 +199,19 @@ int64_t svt_aom_sse_neon_dotprod(const uint8_t *src, int src_stride, const uint8
+     default: return sse_wxh_neon_dotprod(src, src_stride, ref, ref_stride, width, height);
+     }
+ }
++
++uint64_t svt_spatial_full_distortion_kernel_neon_dotprod(uint8_t *src, uint32_t src_offset, uint32_t src_stride,
++                                                         uint8_t *ref, int32_t ref_offset, uint32_t ref_stride,
++                                                         uint32_t width, uint32_t height) {
++    src += src_offset;
++    ref += ref_offset;
++    switch (width) {
++    case 4: return sse_4xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 8: return sse_8xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 16: return sse_16xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 32: return sse_32xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 64: return sse_64xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 128: return sse_128xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    default: return sse_wxh_neon_dotprod(src, src_stride, ref, ref_stride, width, height);
++    }
++}
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index 5abfa00c..de66cac8 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1050,7 +1050,7 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(svt_aom_un_pack2d_16_bit_src_mul4, svt_enc_msb_un_pack2_d, svt_enc_msb_un_pack2d_neon);
+     SET_NEON(svt_full_distortion_kernel_cbf_zero32_bits, svt_full_distortion_kernel_cbf_zero32_bits_c, svt_full_distortion_kernel_cbf_zero32_bits_neon);
+     SET_NEON(svt_full_distortion_kernel32_bits, svt_full_distortion_kernel32_bits_c, svt_full_distortion_kernel32_bits_neon);
+-    SET_NEON(svt_spatial_full_distortion_kernel, svt_spatial_full_distortion_kernel_c, svt_spatial_full_distortion_kernel_neon);
++    SET_NEON_NEON_DOTPROD(svt_spatial_full_distortion_kernel, svt_spatial_full_distortion_kernel_c, svt_spatial_full_distortion_kernel_neon, svt_spatial_full_distortion_kernel_neon_dotprod);
+     SET_NEON(svt_full_distortion_kernel16_bits, svt_full_distortion_kernel16_bits_c, svt_full_distortion_kernel16_bits_neon);
+     SET_NEON(svt_residual_kernel8bit, svt_residual_kernel8bit_c, svt_residual_kernel8bit_neon);
+     SET_NEON(svt_residual_kernel16bit, svt_residual_kernel16bit_c, svt_residual_kernel16bit_neon);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index 1c662e2d..e26e7fd1 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1152,6 +1152,7 @@ extern "C" {
+     void svt_av1_highbd_warp_affine_sve(const int32_t *mat, const uint8_t *ref8b, const uint8_t *ref2b,  int width, int height, int stride8b, int stride2b, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, int bd, ConvolveParams *conv_params, int16_t alpha, int16_t beta, int16_t gamma, int16_t delta);
+ 
+     uint64_t svt_spatial_full_distortion_kernel_neon(uint8_t *input, uint32_t input_offset, uint32_t input_stride, uint8_t *recon, int32_t recon_offset, uint32_t recon_stride, uint32_t area_width, uint32_t area_height);
++    uint64_t svt_spatial_full_distortion_kernel_neon_dotprod(uint8_t *input, uint32_t input_offset, uint32_t input_stride, uint8_t *recon, int32_t recon_offset, uint32_t recon_stride, uint32_t area_width, uint32_t area_height);
+ 
+     void svt_av1_wiener_convolve_add_src_neon(const uint8_t *const src, const ptrdiff_t src_stride, uint8_t *const dst, const ptrdiff_t dst_stride, const int16_t *const filter_x, const int16_t *const filter_y, const int32_t w, const int32_t h, const ConvolveParams *const conv_params);
+ 
+diff --git a/test/SpatialFullDistortionTest.cc b/test/SpatialFullDistortionTest.cc
+index c18aef48..cf1b8567 100644
+--- a/test/SpatialFullDistortionTest.cc
++++ b/test/SpatialFullDistortionTest.cc
+@@ -276,6 +276,14 @@ INSTANTIATE_TEST_SUITE_P(
+     ::testing::Combine(
+         ::testing::ValuesIn(TEST_AREA_SIZES),
+         ::testing::Values(svt_spatial_full_distortion_kernel_neon)));
++
++#if HAVE_NEON_DOTPROD
++INSTANTIATE_TEST_SUITE_P(
++    NEON_DOTPROD, SpatialFullDistortionKernelFuncTest,
++    ::testing::Combine(
++        ::testing::ValuesIn(TEST_AREA_SIZES),
++        ::testing::Values(svt_spatial_full_distortion_kernel_neon_dotprod)));
++#endif  // HAVE_NEON_DOTPROD
+ #endif  // ARCH_AARCH64
+ 
+ class FullDistortionKernel16BitsFuncTest
+-- 
+2.36.0.windows.1
+

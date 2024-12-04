@@ -1,0 +1,432 @@
+From 4d5f6f2389d09474638d04a0f049750357b14861 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Fri, 25 Oct 2024 00:14:06 +0100
+Subject: [PATCH 35/56] Delete svt_aom_highbd_blend_a64_h/vmask_8bit
+
+Delete svt_aom_highbd_blend_a64_hmask_8bit and
+svt_aom_highbd_blend_a64_vmask_8bit as they are unused. The functions
+that are used are svt_aom_highbd_blend_a64_hmask_16bit and
+svt_aom_highbd_blend_a64_vmask_16bit, and they do exactly the same
+thing. Delete all implementations, as well as the tests, and take the
+opportunity to remove the "Eb" prefix of the 16bit unit tests.
+---
+ Source/Lib/ASM_SSE4_1/blend_a64_mask_sse4.c |  52 -------
+ Source/Lib/Codec/blend_a64_mask.c           |  53 -------
+ Source/Lib/Codec/common_dsp_rtcd.c          |   6 -
+ Source/Lib/Codec/common_dsp_rtcd.h          |   8 --
+ test/CompoundUtilTest.cc                    | 144 ++------------------
+ 5 files changed, 12 insertions(+), 251 deletions(-)
+
+diff --git a/Source/Lib/ASM_SSE4_1/blend_a64_mask_sse4.c b/Source/Lib/ASM_SSE4_1/blend_a64_mask_sse4.c
+index 555291e2..a3b5c11f 100644
+--- a/Source/Lib/ASM_SSE4_1/blend_a64_mask_sse4.c
++++ b/Source/Lib/ASM_SSE4_1/blend_a64_mask_sse4.c
+@@ -978,51 +978,6 @@ static void blend_a64_vmask_b12_w8n_sse4_1(uint16_t *dst, uint32_t dst_stride, c
+ // Dispatch
+ //////////////////////////////////////////////////////////////////////////////
+ 
+-void svt_aom_highbd_blend_a64_vmask_8bit_sse4_1(uint8_t *dst_8, uint32_t dst_stride, const uint8_t *src0_8,
+-                                                uint32_t src0_stride, const uint8_t *src1_8, uint32_t src1_stride,
+-                                                const uint8_t *mask, int w, int h, int bd) {
+-    typedef void (*BlendFn)(uint16_t * dst,
+-                            uint32_t        dst_stride,
+-                            const uint16_t *src0,
+-                            uint32_t        src0_stride,
+-                            const uint16_t *src1,
+-                            uint32_t        src1_stride,
+-                            const uint8_t  *mask,
+-                            int             w,
+-                            int             h);
+-
+-    assert(IMPLIES(src0_8 == dst_8, src0_stride == dst_stride));
+-    assert(IMPLIES(src1_8 == dst_8, src1_stride == dst_stride));
+-
+-    assert(h >= 1);
+-    assert(w >= 1);
+-    assert(IS_POWER_OF_TWO(h));
+-    assert(IS_POWER_OF_TWO(w));
+-
+-    assert(bd == 8 || bd == 10 || bd == 12);
+-
+-    if (EB_UNLIKELY((h | w) & 3)) { // if (w <= 2 || h <= 2)
+-        svt_aom_highbd_blend_a64_vmask_8bit_c(
+-            dst_8, dst_stride, src0_8, src0_stride, src1_8, src1_stride, mask, w, h, bd);
+-    } else {
+-        uint16_t *const       dst  = (uint16_t *)(dst_8); // CONVERT_TO_SHORTPTR(dst_8);
+-        const uint16_t *const src0 = (uint16_t *)(src0_8); //CONVERT_TO_SHORTPTR(src0_8);
+-        const uint16_t *const src1 = (uint16_t *)(src1_8); //CONVERT_TO_SHORTPTR(src1_8);
+-        // Dimensions are: bd_index X width_index
+-        static const BlendFn blend[2][2] = {{
+-                                                // bd == 8 or 10
+-                                                blend_a64_vmask_b10_w8n_sse4_1, // w % 8 == 0
+-                                                blend_a64_vmask_b10_w4_sse4_1, // w == 4
+-                                            },
+-                                            {
+-                                                // bd == 12
+-                                                blend_a64_vmask_b12_w8n_sse4_1, // w % 8 == 0
+-                                                blend_a64_vmask_b12_w4_sse4_1, // w == 4
+-                                            }};
+-        blend[bd == 12][(w >> 2) & 1](dst, dst_stride, src0, src0_stride, src1, src1_stride, mask, w, h);
+-    }
+-}
+-
+ /*Horizontal related blend functions*/
+ 
+ // To start out, just dispatch to the function using the 2D mask and
+@@ -1033,13 +988,6 @@ void svt_aom_blend_a64_hmask_sse4_1(uint8_t *dst, uint32_t dst_stride, const uin
+     svt_aom_blend_a64_mask_sse4_1(dst, dst_stride, src0, src0_stride, src1, src1_stride, mask, 0, w, h, 0, 0);
+ }
+ 
+-void svt_aom_highbd_blend_a64_hmask_8bit_sse4_1(uint8_t *dst_8, uint32_t dst_stride, const uint8_t *src0_8,
+-                                                uint32_t src0_stride, const uint8_t *src1_8, uint32_t src1_stride,
+-                                                const uint8_t *mask, int w, int h, int bd) {
+-    svt_aom_highbd_blend_a64_mask_8bit_sse4_1(
+-        dst_8, dst_stride, src0_8, src0_stride, src1_8, src1_stride, mask, 0, w, h, 0, 0, bd);
+-}
+-
+ void svt_aom_highbd_blend_a64_mask_16bit_sse4_1(uint16_t *dst, uint32_t dst_stride, const uint16_t *src0,
+                                                 uint32_t src0_stride, const uint16_t *src1, uint32_t src1_stride,
+                                                 const uint8_t *mask, uint32_t mask_stride, int w, int h, int subw,
+diff --git a/Source/Lib/Codec/blend_a64_mask.c b/Source/Lib/Codec/blend_a64_mask.c
+index 8f965a9e..93aa368d 100644
+--- a/Source/Lib/Codec/blend_a64_mask.c
++++ b/Source/Lib/Codec/blend_a64_mask.c
+@@ -319,33 +319,6 @@ void svt_aom_blend_a64_vmask_c(uint8_t *dst, uint32_t dst_stride, const uint8_t
+     }
+ }
+ 
+-void svt_aom_highbd_blend_a64_vmask_8bit_c(uint8_t *dst_8, uint32_t dst_stride, const uint8_t *src0_8,
+-                                           uint32_t src0_stride, const uint8_t *src1_8, uint32_t src1_stride,
+-                                           const uint8_t *mask, int w, int h, int bd) {
+-    int             i, j;
+-    uint16_t       *dst  = (uint16_t *)(dst_8); // CONVERT_TO_SHORTPTR(dst_8);
+-    const uint16_t *src0 = (uint16_t *)(src0_8); //CONVERT_TO_SHORTPTR(src0_8);
+-    const uint16_t *src1 = (uint16_t *)(src1_8); //CONVERT_TO_SHORTPTR(src1_8);
+-    (void)bd;
+-
+-    assert(IMPLIES(src0 == dst, src0_stride == dst_stride));
+-    assert(IMPLIES(src1 == dst, src1_stride == dst_stride));
+-
+-    assert(h >= 1);
+-    assert(w >= 1);
+-    assert(IS_POWER_OF_TWO(h));
+-    assert(IS_POWER_OF_TWO(w));
+-
+-    assert(bd == 8 || bd == 10 || bd == 12);
+-
+-    for (i = 0; i < h; ++i) {
+-        const int m = mask[i];
+-        for (j = 0; j < w; ++j) {
+-            dst[i * dst_stride + j] = AOM_BLEND_A64(m, src0[i * src0_stride + j], src1[i * src1_stride + j]);
+-        }
+-    }
+-}
+-
+ /*Horizontal mask related blend functions*/
+ void svt_aom_blend_a64_hmask_c(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride,
+                                const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h) {
+@@ -365,29 +338,3 @@ void svt_aom_blend_a64_hmask_c(uint8_t *dst, uint32_t dst_stride, const uint8_t
+         }
+     }
+ }
+-
+-void svt_aom_highbd_blend_a64_hmask_8bit_c(uint8_t *dst_8, uint32_t dst_stride, const uint8_t *src0_8,
+-                                           uint32_t src0_stride, const uint8_t *src1_8, uint32_t src1_stride,
+-                                           const uint8_t *mask, int w, int h, int bd) {
+-    int             i, j;
+-    uint16_t       *dst  = (uint16_t *)(dst_8); // CONVERT_TO_SHORTPTR(dst_8);
+-    const uint16_t *src0 = (uint16_t *)(src0_8); //CONVERT_TO_SHORTPTR(src0_8);
+-    const uint16_t *src1 = (uint16_t *)(src1_8); //CONVERT_TO_SHORTPTR(src1_8);
+-    (void)bd;
+-
+-    assert(IMPLIES(src0 == dst, src0_stride == dst_stride));
+-    assert(IMPLIES(src1 == dst, src1_stride == dst_stride));
+-
+-    assert(h >= 1);
+-    assert(w >= 1);
+-    assert(IS_POWER_OF_TWO(h));
+-    assert(IS_POWER_OF_TWO(w));
+-
+-    assert(bd == 8 || bd == 10 || bd == 12);
+-
+-    for (i = 0; i < h; ++i) {
+-        for (j = 0; j < w; ++j) {
+-            dst[i * dst_stride + j] = AOM_BLEND_A64(mask[j], src0[i * src0_stride + j], src1[i * src1_stride + j]);
+-        }
+-    }
+-}
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index 580c0c87..4da5ca21 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -466,8 +466,6 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_SSE41_AVX2(svt_aom_blend_a64_vmask, svt_aom_blend_a64_vmask_c, svt_aom_blend_a64_vmask_sse4_1, svt_av1_blend_a64_vmask_avx2);
+     SET_SSE41_AVX2(svt_aom_lowbd_blend_a64_d16_mask, svt_aom_lowbd_blend_a64_d16_mask_c, svt_aom_lowbd_blend_a64_d16_mask_sse4_1, svt_aom_lowbd_blend_a64_d16_mask_avx2);
+     SET_SSE41(svt_aom_highbd_blend_a64_mask, svt_aom_highbd_blend_a64_mask_c, svt_aom_highbd_blend_a64_mask_8bit_sse4_1);
+-    SET_SSE41(svt_aom_highbd_blend_a64_hmask_8bit, svt_aom_highbd_blend_a64_hmask_8bit_c, svt_aom_highbd_blend_a64_hmask_8bit_sse4_1);
+-    SET_SSE41(svt_aom_highbd_blend_a64_vmask_8bit, svt_aom_highbd_blend_a64_vmask_8bit_c, svt_aom_highbd_blend_a64_vmask_8bit_sse4_1);
+     SET_SSE41_AVX2(svt_aom_highbd_blend_a64_vmask_16bit, svt_aom_highbd_blend_a64_vmask_16bit_c, svt_aom_highbd_blend_a64_vmask_16bit_sse4_1, svt_av1_highbd_blend_a64_vmask_16bit_avx2);
+     SET_SSE41_AVX2(svt_aom_highbd_blend_a64_hmask_16bit, svt_aom_highbd_blend_a64_hmask_16bit_c, svt_aom_highbd_blend_a64_hmask_16bit_sse4_1, svt_av1_highbd_blend_a64_hmask_16bit_avx2);
+     SET_SSE41_AVX2(svt_aom_highbd_blend_a64_d16_mask, svt_aom_highbd_blend_a64_d16_mask_c, svt_aom_highbd_blend_a64_d16_mask_sse4_1, svt_aom_highbd_blend_a64_d16_mask_avx2);
+@@ -1001,8 +999,6 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(svt_aom_blend_a64_vmask, svt_aom_blend_a64_vmask_c, svt_aom_blend_a64_vmask_neon);
+     SET_NEON(svt_aom_lowbd_blend_a64_d16_mask, svt_aom_lowbd_blend_a64_d16_mask_c, svt_aom_lowbd_blend_a64_d16_mask_neon);
+     SET_NEON(svt_aom_highbd_blend_a64_mask, svt_aom_highbd_blend_a64_mask_c, svt_aom_highbd_blend_a64_mask_neon);
+-    SET_ONLY_C(svt_aom_highbd_blend_a64_hmask_8bit, svt_aom_highbd_blend_a64_hmask_8bit_c);
+-    SET_ONLY_C(svt_aom_highbd_blend_a64_vmask_8bit, svt_aom_highbd_blend_a64_vmask_8bit_c);
+     SET_ONLY_C(svt_aom_highbd_blend_a64_vmask_16bit, svt_aom_highbd_blend_a64_vmask_16bit_c);
+     SET_ONLY_C(svt_aom_highbd_blend_a64_hmask_16bit, svt_aom_highbd_blend_a64_hmask_16bit_c);
+     SET_NEON(svt_aom_highbd_blend_a64_d16_mask, svt_aom_highbd_blend_a64_d16_mask_c, svt_aom_highbd_blend_a64_d16_mask_neon);
+@@ -1529,8 +1525,6 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_ONLY_C(svt_aom_blend_a64_vmask, svt_aom_blend_a64_vmask_c);
+     SET_ONLY_C(svt_aom_lowbd_blend_a64_d16_mask, svt_aom_lowbd_blend_a64_d16_mask_c);
+     SET_ONLY_C(svt_aom_highbd_blend_a64_mask, svt_aom_highbd_blend_a64_mask_c);
+-    SET_ONLY_C(svt_aom_highbd_blend_a64_hmask_8bit, svt_aom_highbd_blend_a64_hmask_8bit_c);
+-    SET_ONLY_C(svt_aom_highbd_blend_a64_vmask_8bit, svt_aom_highbd_blend_a64_vmask_8bit_c);
+     SET_ONLY_C(svt_aom_highbd_blend_a64_vmask_16bit, svt_aom_highbd_blend_a64_vmask_16bit_c);
+     SET_ONLY_C(svt_aom_highbd_blend_a64_hmask_16bit, svt_aom_highbd_blend_a64_hmask_16bit_c);
+     SET_ONLY_C(svt_aom_highbd_blend_a64_d16_mask, svt_aom_highbd_blend_a64_d16_mask_c);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index 7b6a73a5..343c376b 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -68,10 +68,6 @@ extern "C" {
+     void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags);
+     void svt_aom_blend_a64_vmask_c(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h);
+     RTCD_EXTERN void(*svt_aom_blend_a64_vmask)(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h);
+-    void svt_aom_highbd_blend_a64_vmask_8bit_c(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h, int bd);
+-    RTCD_EXTERN void(*svt_aom_highbd_blend_a64_vmask_8bit)(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h, int bd);
+-    void svt_aom_highbd_blend_a64_hmask_8bit_c(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h, int bd);
+-    RTCD_EXTERN void(*svt_aom_highbd_blend_a64_hmask_8bit)(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h, int bd);
+     void svt_aom_blend_a64_hmask_c(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h);
+     RTCD_EXTERN void(*svt_aom_blend_a64_hmask)(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h);
+     void svt_aom_blend_a64_mask_c(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, uint32_t mask_stride, int w, int h, int subx, int suby);
+@@ -1474,10 +1470,6 @@ extern "C" {
+ 
+     void svt_aom_blend_a64_vmask_sse4_1(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h);
+ 
+-    void svt_aom_highbd_blend_a64_vmask_8bit_sse4_1(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h, int bd);
+-
+-    void svt_aom_highbd_blend_a64_hmask_8bit_sse4_1(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h, int bd);
+-
+     void svt_aom_blend_a64_hmask_sse4_1(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h);
+ 
+     void svt_aom_blend_a64_mask_sse4_1(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, uint32_t mask_stride, int w, int h, int subx, int suby);
+diff --git a/test/CompoundUtilTest.cc b/test/CompoundUtilTest.cc
+index 71f619f1..0a3e7414 100644
+--- a/test/CompoundUtilTest.cc
++++ b/test/CompoundUtilTest.cc
+@@ -21,8 +21,6 @@
+  *svt_aom_highbd_blend_a64_mask_8bit_sse4_1/svt_aom_highbd_blend_a64_d16_mask_avx2
+  * - svt_aom_blend_a64_hmask_sse4_1/svt_aom_blend_a64_vmask_sse4_1
+  * -
+- *svt_aom_highbd_blend_a64_hmask_8bit_sse4_1/svt_aom_highbd_blend_a64_vmask_8bit_sse4_1
+- * -
+  *svt_aom_highbd_blend_a64_hmask_16bit_sse4_1/svt_aom_highbd_blend_a64_vmask_16bit_sse4_1
+  * - svt_aom_sse_avx2/svt_aom_highbd_sse_avx2
+  *
+@@ -571,8 +569,8 @@ INSTANTIATE_TEST_SUITE_P(
+                                     svt_aom_highbd_blend_a64_d16_mask_neon)}));
+ #endif  // ARCH_AARCH64
+ 
+-using HbdBlendA64HMaskFunc = void (*)(uint8_t *, uint32_t, const uint8_t *,
+-                                      uint32_t, const uint8_t *, uint32_t,
++using HbdBlendA64HMaskFunc = void (*)(uint16_t *, uint32_t, const uint16_t *,
++                                      uint32_t, const uint16_t *, uint32_t,
+                                       const uint8_t *, int, int, int);
+ 
+ class HbdCompBlendHMaskTest
+@@ -591,65 +589,6 @@ class HbdCompBlendHMaskTest
+         run_test();
+     }
+ 
+-    void run_blend(int subw, int subh) override {
+-        (void)subw;
+-        (void)subh;
+-        func_ref_((uint8_t *)ref_dst_,
+-                  dst_stride_,
+-                  (uint8_t *)src0_,
+-                  src_stride_,
+-                  (uint8_t *)src1_,
+-                  src_stride_,
+-                  mask_,
+-                  w_,
+-                  h_,
+-                  bd_);
+-        func_tst_((uint8_t *)tst_dst_,
+-                  dst_stride_,
+-                  (uint8_t *)src0_,
+-                  src_stride_,
+-                  (uint8_t *)src1_,
+-                  src_stride_,
+-                  mask_,
+-                  w_,
+-                  h_,
+-                  bd_);
+-    }
+-};
+-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(HbdCompBlendHMaskTest);
+-
+-TEST_P(HbdCompBlendHMaskTest, BlendA64Mask) {
+-    run_hbd_test(8);
+-    run_hbd_test(10);
+-}
+-
+-#ifdef ARCH_X86_64
+-INSTANTIATE_TEST_SUITE_P(SSE4_1, HbdCompBlendHMaskTest,
+-                         ::testing::ValuesIn({make_tuple(
+-                             svt_aom_highbd_blend_a64_hmask_8bit_c,
+-                             svt_aom_highbd_blend_a64_hmask_8bit_sse4_1)}));
+-#endif  // ARCH_X86_64
+-
+-using EbHbdBlendA64HMaskFunc = void (*)(uint16_t *, uint32_t, const uint16_t *,
+-                                        uint32_t, const uint16_t *, uint32_t,
+-                                        const uint8_t *, int, int, int);
+-
+-class EbHbdCompBlendHMaskTest
+-    : public CompBlendTest<uint16_t, uint16_t, EbHbdBlendA64HMaskFunc,
+-                           MAKE_PARAM(EbHbdBlendA64HMaskFunc)> {
+-  public:
+-    EbHbdCompBlendHMaskTest() {
+-        bd_ = 8;
+-        func_ref_ = TEST_GET_PARAM(0);
+-        func_tst_ = TEST_GET_PARAM(1);
+-        no_sub_ = true;
+-    }
+-
+-    void run_hbd_test(uint8_t bd) {
+-        bd_ = bd;
+-        run_test();
+-    }
+-
+     void run_blend(int subw, int subh) override {
+         (void)subw;
+         (void)subh;
+@@ -680,27 +619,27 @@ class EbHbdCompBlendHMaskTest
+                   bd_);
+     }
+ };
+-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(EbHbdCompBlendHMaskTest);
++GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(HbdCompBlendHMaskTest);
+ 
+-TEST_P(EbHbdCompBlendHMaskTest, BlendA64Mask) {
++TEST_P(HbdCompBlendHMaskTest, BlendA64Mask) {
+     run_hbd_test(8);
+     run_hbd_test(10);
+ }
+ 
+ #ifdef ARCH_X86_64
+-INSTANTIATE_TEST_SUITE_P(SSE4_1, EbHbdCompBlendHMaskTest,
++INSTANTIATE_TEST_SUITE_P(SSE4_1, HbdCompBlendHMaskTest,
+                          ::testing::ValuesIn({make_tuple(
+                              svt_aom_highbd_blend_a64_hmask_16bit_c,
+                              svt_aom_highbd_blend_a64_hmask_16bit_sse4_1)}));
+ 
+-INSTANTIATE_TEST_SUITE_P(AVX2, EbHbdCompBlendHMaskTest,
++INSTANTIATE_TEST_SUITE_P(AVX2, HbdCompBlendHMaskTest,
+                          ::testing::ValuesIn({make_tuple(
+                              svt_aom_highbd_blend_a64_hmask_16bit_c,
+                              svt_av1_highbd_blend_a64_hmask_16bit_avx2)}));
+ #endif  // ARCH_X86_64
+ 
+-using HbdBlendA64VMaskFunc = void (*)(uint8_t *, uint32_t, const uint8_t *,
+-                                      uint32_t, const uint8_t *, uint32_t,
++using HbdBlendA64VMaskFunc = void (*)(uint16_t *, uint32_t, const uint16_t *,
++                                      uint32_t, const uint16_t *, uint32_t,
+                                       const uint8_t *, int, int, int);
+ 
+ class HbdCompBlendVMaskTest
+@@ -719,65 +658,6 @@ class HbdCompBlendVMaskTest
+         run_test();
+     }
+ 
+-    void run_blend(int subw, int subh) override {
+-        (void)subw;
+-        (void)subh;
+-        func_ref_((uint8_t *)ref_dst_,
+-                  dst_stride_,
+-                  (uint8_t *)src0_,
+-                  src_stride_,
+-                  (uint8_t *)src1_,
+-                  src_stride_,
+-                  mask_,
+-                  w_,
+-                  h_,
+-                  bd_);
+-        func_tst_((uint8_t *)tst_dst_,
+-                  dst_stride_,
+-                  (uint8_t *)src0_,
+-                  src_stride_,
+-                  (uint8_t *)src1_,
+-                  src_stride_,
+-                  mask_,
+-                  w_,
+-                  h_,
+-                  bd_);
+-    }
+-};
+-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(HbdCompBlendVMaskTest);
+-
+-TEST_P(HbdCompBlendVMaskTest, BlendA64Mask) {
+-    run_hbd_test(8);
+-    run_hbd_test(10);
+-}
+-
+-#ifdef ARCH_X86_64
+-INSTANTIATE_TEST_SUITE_P(SSE4_1, HbdCompBlendVMaskTest,
+-                         ::testing::ValuesIn({make_tuple(
+-                             svt_aom_highbd_blend_a64_vmask_8bit_c,
+-                             svt_aom_highbd_blend_a64_vmask_8bit_sse4_1)}));
+-#endif  // ARCH_X86_64
+-
+-using EbHbdBlendA64VMaskFunc = void (*)(uint16_t *, uint32_t, const uint16_t *,
+-                                        uint32_t, const uint16_t *, uint32_t,
+-                                        const uint8_t *, int, int, int);
+-
+-class EbHbdCompBlendVMaskTest
+-    : public CompBlendTest<uint16_t, uint16_t, EbHbdBlendA64VMaskFunc,
+-                           MAKE_PARAM(EbHbdBlendA64VMaskFunc)> {
+-  public:
+-    EbHbdCompBlendVMaskTest() {
+-        bd_ = 8;
+-        func_ref_ = TEST_GET_PARAM(0);
+-        func_tst_ = TEST_GET_PARAM(1);
+-        no_sub_ = true;
+-    }
+-
+-    void run_hbd_test(uint8_t bd) {
+-        bd_ = bd;
+-        run_test();
+-    }
+-
+     void run_blend(int subw, int subh) override {
+         (void)subw;
+         (void)subh;
+@@ -808,20 +688,20 @@ class EbHbdCompBlendVMaskTest
+                   bd_);
+     }
+ };
+-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(EbHbdCompBlendVMaskTest);
++GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(HbdCompBlendVMaskTest);
+ 
+-TEST_P(EbHbdCompBlendVMaskTest, BlendA64Mask) {
++TEST_P(HbdCompBlendVMaskTest, BlendA64Mask) {
+     run_hbd_test(8);
+     run_hbd_test(10);
+ }
+ 
+ #ifdef ARCH_X86_64
+-INSTANTIATE_TEST_SUITE_P(SSE4_1, EbHbdCompBlendVMaskTest,
++INSTANTIATE_TEST_SUITE_P(SSE4_1, HbdCompBlendVMaskTest,
+                          ::testing::ValuesIn({make_tuple(
+                              svt_aom_highbd_blend_a64_vmask_16bit_c,
+                              svt_aom_highbd_blend_a64_vmask_16bit_sse4_1)}));
+ 
+-INSTANTIATE_TEST_SUITE_P(AVX2, EbHbdCompBlendVMaskTest,
++INSTANTIATE_TEST_SUITE_P(AVX2, HbdCompBlendVMaskTest,
+                          ::testing::ValuesIn({make_tuple(
+                              svt_aom_highbd_blend_a64_vmask_16bit_c,
+                              svt_av1_highbd_blend_a64_vmask_16bit_avx2)}));
+-- 
+2.36.0.windows.1
+

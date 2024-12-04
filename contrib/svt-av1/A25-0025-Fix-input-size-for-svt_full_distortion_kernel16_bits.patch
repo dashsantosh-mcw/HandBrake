@@ -1,0 +1,30 @@
+From 3f124cda6b3fe452f35a0b14f1c2286aebe64a3c Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Wed, 23 Oct 2024 10:29:28 +0100
+Subject: [PATCH 25/56] Fix input size for svt_full_distortion_kernel16_bits
+ unit tests
+
+Change the input size from 15 bits to 10 bits, as it is the maximum
+bitdepth supported by SVT-AV1.
+---
+ test/SpatialFullDistortionTest.cc | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/test/SpatialFullDistortionTest.cc b/test/SpatialFullDistortionTest.cc
+index db1efbbb..c18aef48 100644
+--- a/test/SpatialFullDistortionTest.cc
++++ b/test/SpatialFullDistortionTest.cc
+@@ -293,8 +293,8 @@ class FullDistortionKernel16BitsFuncTest
+     }
+ 
+     void init_data(TestPattern pattern) {
+-        /// Support up to 15 bit depth
+-        const uint16_t mask = (1 << 15) - 1;
++        /// Support up to 10 bit depth
++        const uint16_t mask = (1 << 10) - 1;
+         uint16_t *input_16bit = (uint16_t *)input_;
+         uint16_t *recon_16bit = (uint16_t *)recon_;
+         SVTRandom rnd = SVTRandom(0, mask);
+-- 
+2.36.0.windows.1
+

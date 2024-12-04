@@ -1,0 +1,279 @@
+From 04f0d200377d0c7698c82a836745e1f78419a4ef Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Tue, 22 Oct 2024 17:51:27 +0100
+Subject: [PATCH 24/56] Add SVE implementation of svt_aom_highbd_sse
+
+Port the libaom SVE implementation of svt_aom_highbd_sse and add the
+corresponding tests.
+---
+ Source/Lib/ASM_SVE/CMakeLists.txt   |   1 +
+ Source/Lib/ASM_SVE/highbd_sse_sve.c | 199 ++++++++++++++++++++++++++++
+ Source/Lib/Codec/aom_dsp_rtcd.c     |   2 +-
+ Source/Lib/Codec/aom_dsp_rtcd.h     |   1 +
+ test/CompoundUtilTest.cc            |   7 +
+ 5 files changed, 209 insertions(+), 1 deletion(-)
+ create mode 100644 Source/Lib/ASM_SVE/highbd_sse_sve.c
+
+diff --git a/Source/Lib/ASM_SVE/CMakeLists.txt b/Source/Lib/ASM_SVE/CMakeLists.txt
+index 58eae80e..e585e602 100644
+--- a/Source/Lib/ASM_SVE/CMakeLists.txt
++++ b/Source/Lib/ASM_SVE/CMakeLists.txt
+@@ -22,6 +22,7 @@ target_sources(
+   PUBLIC highbd_convolve_sve.c
+   PUBLIC highbd_jnt_convolve_sve.c
+   PUBLIC highbd_pickrst_sve.c
++  PUBLIC highbd_sse_sve.c
+   PUBLIC highbd_variance_sve.c
+   PUBLIC highbd_warp_plane_sve.c
+   PUBLIC pickrst_sve.c
+diff --git a/Source/Lib/ASM_SVE/highbd_sse_sve.c b/Source/Lib/ASM_SVE/highbd_sse_sve.c
+new file mode 100644
+index 00000000..993a3b4e
+--- /dev/null
++++ b/Source/Lib/ASM_SVE/highbd_sse_sve.c
+@@ -0,0 +1,199 @@
++/*
++ * Copyright (c) 2023, Alliance for Open Media. All rights reserved
++ *
++ * This source code is subject to the terms of the BSD 2 Clause License and
++ * the Alliance for Open Media Patent License 1.0. If the BSD 2 Clause License
++ * was not distributed with this source code in the LICENSE file, you can
++ * obtain it at www.aomedia.org/license/software. If the Alliance for Open
++ * Media Patent License 1.0 was not distributed with this source code in the
++ * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
++ */
++
++#include <arm_neon.h>
++
++#include "aom_dsp_rtcd.h"
++#include "mem_neon.h"
++#include "neon_sve_bridge.h"
++#include "sum_neon.h"
++
++static INLINE void highbd_sse_8x1_neon(const uint16_t *src, const uint16_t *ref, uint64x2_t *sse) {
++    uint16x8_t s = vld1q_u16(src);
++    uint16x8_t r = vld1q_u16(ref);
++
++    uint16x8_t abs_diff = vabdq_u16(s, r);
++
++    *sse = svt_udotq_u16(*sse, abs_diff, abs_diff);
++}
++
++static INLINE int64_t highbd_sse_128xh_sve(const uint16_t *src, int src_stride, const uint16_t *ref, int ref_stride,
++                                           int height) {
++    uint64x2_t sse[4] = {vdupq_n_u64(0), vdupq_n_u64(0), vdupq_n_u64(0), vdupq_n_u64(0)};
++
++    do {
++        highbd_sse_8x1_neon(src + 0 * 8, ref + 0 * 8, &sse[0]);
++        highbd_sse_8x1_neon(src + 1 * 8, ref + 1 * 8, &sse[1]);
++        highbd_sse_8x1_neon(src + 2 * 8, ref + 2 * 8, &sse[2]);
++        highbd_sse_8x1_neon(src + 3 * 8, ref + 3 * 8, &sse[3]);
++        highbd_sse_8x1_neon(src + 4 * 8, ref + 4 * 8, &sse[0]);
++        highbd_sse_8x1_neon(src + 5 * 8, ref + 5 * 8, &sse[1]);
++        highbd_sse_8x1_neon(src + 6 * 8, ref + 6 * 8, &sse[2]);
++        highbd_sse_8x1_neon(src + 7 * 8, ref + 7 * 8, &sse[3]);
++        highbd_sse_8x1_neon(src + 8 * 8, ref + 8 * 8, &sse[0]);
++        highbd_sse_8x1_neon(src + 9 * 8, ref + 9 * 8, &sse[1]);
++        highbd_sse_8x1_neon(src + 10 * 8, ref + 10 * 8, &sse[2]);
++        highbd_sse_8x1_neon(src + 11 * 8, ref + 11 * 8, &sse[3]);
++        highbd_sse_8x1_neon(src + 12 * 8, ref + 12 * 8, &sse[0]);
++        highbd_sse_8x1_neon(src + 13 * 8, ref + 13 * 8, &sse[1]);
++        highbd_sse_8x1_neon(src + 14 * 8, ref + 14 * 8, &sse[2]);
++        highbd_sse_8x1_neon(src + 15 * 8, ref + 15 * 8, &sse[3]);
++
++        src += src_stride;
++        ref += ref_stride;
++    } while (--height != 0);
++
++    sse[0] = vaddq_u64(sse[0], sse[1]);
++    sse[2] = vaddq_u64(sse[2], sse[3]);
++    sse[0] = vaddq_u64(sse[0], sse[2]);
++    return vaddvq_u64(sse[0]);
++}
++
++static INLINE int64_t highbd_sse_64xh_sve(const uint16_t *src, int src_stride, const uint16_t *ref, int ref_stride,
++                                          int height) {
++    uint64x2_t sse[4] = {vdupq_n_u64(0), vdupq_n_u64(0), vdupq_n_u64(0), vdupq_n_u64(0)};
++
++    do {
++        highbd_sse_8x1_neon(src + 0 * 8, ref + 0 * 8, &sse[0]);
++        highbd_sse_8x1_neon(src + 1 * 8, ref + 1 * 8, &sse[1]);
++        highbd_sse_8x1_neon(src + 2 * 8, ref + 2 * 8, &sse[2]);
++        highbd_sse_8x1_neon(src + 3 * 8, ref + 3 * 8, &sse[3]);
++        highbd_sse_8x1_neon(src + 4 * 8, ref + 4 * 8, &sse[0]);
++        highbd_sse_8x1_neon(src + 5 * 8, ref + 5 * 8, &sse[1]);
++        highbd_sse_8x1_neon(src + 6 * 8, ref + 6 * 8, &sse[2]);
++        highbd_sse_8x1_neon(src + 7 * 8, ref + 7 * 8, &sse[3]);
++
++        src += src_stride;
++        ref += ref_stride;
++    } while (--height != 0);
++
++    sse[0] = vaddq_u64(sse[0], sse[1]);
++    sse[2] = vaddq_u64(sse[2], sse[3]);
++    sse[0] = vaddq_u64(sse[0], sse[2]);
++    return vaddvq_u64(sse[0]);
++}
++
++static INLINE int64_t highbd_sse_32xh_sve(const uint16_t *src, int src_stride, const uint16_t *ref, int ref_stride,
++                                          int height) {
++    uint64x2_t sse[4] = {vdupq_n_u64(0), vdupq_n_u64(0), vdupq_n_u64(0), vdupq_n_u64(0)};
++
++    do {
++        highbd_sse_8x1_neon(src + 0 * 8, ref + 0 * 8, &sse[0]);
++        highbd_sse_8x1_neon(src + 1 * 8, ref + 1 * 8, &sse[1]);
++        highbd_sse_8x1_neon(src + 2 * 8, ref + 2 * 8, &sse[2]);
++        highbd_sse_8x1_neon(src + 3 * 8, ref + 3 * 8, &sse[3]);
++
++        src += src_stride;
++        ref += ref_stride;
++    } while (--height != 0);
++
++    sse[0] = vaddq_u64(sse[0], sse[1]);
++    sse[2] = vaddq_u64(sse[2], sse[3]);
++    sse[0] = vaddq_u64(sse[0], sse[2]);
++    return vaddvq_u64(sse[0]);
++}
++
++static INLINE int64_t highbd_sse_16xh_sve(const uint16_t *src, int src_stride, const uint16_t *ref, int ref_stride,
++                                          int height) {
++    uint64x2_t sse[2] = {vdupq_n_u64(0), vdupq_n_u64(0)};
++
++    do {
++        highbd_sse_8x1_neon(src + 0 * 8, ref + 0 * 8, &sse[0]);
++        highbd_sse_8x1_neon(src + 1 * 8, ref + 1 * 8, &sse[1]);
++
++        src += src_stride;
++        ref += ref_stride;
++    } while (--height != 0);
++
++    return vaddvq_u64(vaddq_u64(sse[0], sse[1]));
++}
++
++static INLINE int64_t highbd_sse_8xh_sve(const uint16_t *src, int src_stride, const uint16_t *ref, int ref_stride,
++                                         int height) {
++    uint64x2_t sse[2] = {vdupq_n_u64(0), vdupq_n_u64(0)};
++
++    do {
++        highbd_sse_8x1_neon(src + 0 * src_stride, ref + 0 * ref_stride, &sse[0]);
++        highbd_sse_8x1_neon(src + 1 * src_stride, ref + 1 * ref_stride, &sse[1]);
++
++        src += 2 * src_stride;
++        ref += 2 * ref_stride;
++        height -= 2;
++    } while (height != 0);
++
++    return vaddvq_u64(vaddq_u64(sse[0], sse[1]));
++}
++
++static INLINE int64_t highbd_sse_4xh_sve(const uint16_t *src, int src_stride, const uint16_t *ref, int ref_stride,
++                                         int height) {
++    uint64x2_t sse = vdupq_n_u64(0);
++
++    do {
++        uint16x8_t s = load_unaligned_u16_4x2(src, src_stride);
++        uint16x8_t r = load_unaligned_u16_4x2(ref, ref_stride);
++
++        uint16x8_t abs_diff = vabdq_u16(s, r);
++        sse                 = svt_udotq_u16(sse, abs_diff, abs_diff);
++
++        src += 2 * src_stride;
++        ref += 2 * ref_stride;
++        height -= 2;
++    } while (height != 0);
++
++    return vaddvq_u64(sse);
++}
++
++static INLINE int64_t highbd_sse_wxh_sve(const uint16_t *src, int src_stride, const uint16_t *ref, int ref_stride,
++                                         int width, int height) {
++    svuint64_t sse  = svdup_n_u64(0);
++    uint64_t   step = svcnth();
++
++    do {
++        int             w       = 0;
++        const uint16_t *src_ptr = src;
++        const uint16_t *ref_ptr = ref;
++
++        do {
++            svbool_t   pred = svwhilelt_b16_u32(w, width);
++            svuint16_t s    = svld1_u16(pred, src_ptr);
++            svuint16_t r    = svld1_u16(pred, ref_ptr);
++
++            svuint16_t abs_diff = svabd_u16_z(pred, s, r);
++
++            sse = svdot_u64(sse, abs_diff, abs_diff);
++
++            src_ptr += step;
++            ref_ptr += step;
++            w += step;
++        } while (w < width);
++
++        src += src_stride;
++        ref += ref_stride;
++    } while (--height != 0);
++
++    return svaddv_u64(svptrue_b64(), sse);
++}
++
++int64_t svt_aom_highbd_sse_sve(const uint8_t *src8, int src_stride, const uint8_t *ref8, int ref_stride, int width,
++                               int height) {
++    uint16_t *src = (uint16_t *)src8;
++    uint16_t *ref = (uint16_t *)ref8;
++
++    switch (width) {
++    case 4: return highbd_sse_4xh_sve(src, src_stride, ref, ref_stride, height);
++    case 8: return highbd_sse_8xh_sve(src, src_stride, ref, ref_stride, height);
++    case 16: return highbd_sse_16xh_sve(src, src_stride, ref, ref_stride, height);
++    case 32: return highbd_sse_32xh_sve(src, src_stride, ref, ref_stride, height);
++    case 64: return highbd_sse_64xh_sve(src, src_stride, ref, ref_stride, height);
++    case 128: return highbd_sse_128xh_sve(src, src_stride, ref, ref_stride, height);
++    default: return highbd_sse_wxh_sve(src, src_stride, ref, ref_stride, width, height);
++    }
++}
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.c b/Source/Lib/Codec/aom_dsp_rtcd.c
+index 1c4841aa..138e1940 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.c
++++ b/Source/Lib/Codec/aom_dsp_rtcd.c
+@@ -550,7 +550,7 @@ void svt_aom_setup_rtcd_internal(EbCpuFlags flags) {
+ #elif defined ARCH_AARCH64
+     SET_NEON(hadamard_path, hadamard_path_c, hadamard_path_neon);
+     SET_NEON_NEON_DOTPROD(svt_aom_sse, svt_aom_sse_c, svt_aom_sse_neon, svt_aom_sse_neon_dotprod);
+-    SET_NEON(svt_aom_highbd_sse, svt_aom_highbd_sse_c, svt_aom_highbd_sse_neon);
++    SET_NEON_SVE(svt_aom_highbd_sse, svt_aom_highbd_sse_c, svt_aom_highbd_sse_neon, svt_aom_highbd_sse_sve);
+     SET_NEON(svt_av1_wedge_compute_delta_squares, svt_av1_wedge_compute_delta_squares_c, svt_av1_wedge_compute_delta_squares_neon);
+     SET_NEON_SVE(svt_av1_wedge_sign_from_residuals, svt_av1_wedge_sign_from_residuals_c, svt_av1_wedge_sign_from_residuals_neon, svt_av1_wedge_sign_from_residuals_sve);
+     SET_NEON(svt_compute_cdef_dist_16bit, svt_aom_compute_cdef_dist_c, svt_aom_compute_cdef_dist_16bit_neon);
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.h b/Source/Lib/Codec/aom_dsp_rtcd.h
+index ef8cba17..436aa203 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.h
++++ b/Source/Lib/Codec/aom_dsp_rtcd.h
+@@ -1250,6 +1250,7 @@ extern "C" {
+     int64_t svt_aom_sse_neon(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride, int width, int height);
+     int64_t svt_aom_sse_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride, int width, int height);
+     int64_t svt_aom_highbd_sse_neon(const uint8_t *a8, int a_stride, const uint8_t *b8, int b_stride, int width, int height);
++    int64_t svt_aom_highbd_sse_sve(const uint8_t *a8, int a_stride, const uint8_t *b8, int b_stride, int width, int height);
+     int64_t svt_av1_block_error_neon(const TranLow *coeff, const TranLow *dqcoeff, intptr_t block_size, int64_t *ssz);
+     int8_t svt_av1_wedge_sign_from_residuals_neon(const int16_t *ds, const uint8_t *m, int N, int64_t limit);
+     int8_t svt_av1_wedge_sign_from_residuals_sve(const int16_t *ds, const uint8_t *m, int N, int64_t limit);
+diff --git a/test/CompoundUtilTest.cc b/test/CompoundUtilTest.cc
+index a6c737fc..af45e0a8 100644
+--- a/test/CompoundUtilTest.cc
++++ b/test/CompoundUtilTest.cc
+@@ -1247,6 +1247,13 @@ INSTANTIATE_TEST_SUITE_P(
+     ::testing::Combine(::testing::Range(BLOCK_4X4,
+                                         (BlockSize)(BlockSizeS_ALL + 2)),
+                        ::testing::Values(svt_aom_highbd_sse_neon)));
++#if HAVE_SVE
++INSTANTIATE_TEST_SUITE_P(
++    SVE, AomSseHighbdTest,
++    ::testing::Combine(::testing::Range(BLOCK_4X4,
++                                        (BlockSize)(BlockSizeS_ALL + 2)),
++                       ::testing::Values(svt_aom_highbd_sse_sve)));
++#endif  // HAVE_SVE
+ #endif  // ARCH_AARCH64
+ 
+ typedef void (*AomSubtractBlockFunc)(int, int, int16_t *, ptrdiff_t,
+-- 
+2.36.0.windows.1
+

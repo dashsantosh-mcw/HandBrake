@@ -1,0 +1,94 @@
+From 63c95718d14d03ef800b70ba35b875a5df9d4ac5 Mon Sep 17 00:00:00 2001
+From: hguermaz <hassen.guermazi@intel.com>
+Date: Tue, 5 Nov 2024 08:02:27 -0800
+Subject: [PATCH 42/56] Fix svt_av1_fwht4x4() for ARM architecture
+
+---
+ Source/Lib/Codec/aom_dsp_rtcd.c      |  6 +++++
+ Source/Lib/Codec/md_config_process.c | 38 +++++++++++++---------------
+ 2 files changed, 24 insertions(+), 20 deletions(-)
+
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.c b/Source/Lib/Codec/aom_dsp_rtcd.c
+index 535ef410..08092d95 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.c
++++ b/Source/Lib/Codec/aom_dsp_rtcd.c
+@@ -837,6 +837,9 @@ void svt_aom_setup_rtcd_internal(EbCpuFlags flags) {
+     SET_ONLY_C(svt_av1_fwd_txfm2d_64x16_N4, svt_av1_fwd_txfm2d_64x16_N4_c);
+     SET_ONLY_C(svt_av1_fwd_txfm2d_64x32_N4, svt_av1_fwd_txfm2d_64x32_N4_c);
+     SET_NEON(svt_av1_fwd_txfm2d_64x64_N4, svt_aom_transform_two_d_64x64_N4_c, svt_av1_fwd_txfm2d_64x64_N4_neon);
++#if FTR_LOSSLESS_SUPPORT
++    SET_ONLY_C(svt_av1_fwht4x4, svt_av1_fwht4x4_c);
++#endif
+     SET_ONLY_C(svt_aom_fft2x2_float, svt_aom_fft2x2_float_c);
+     SET_ONLY_C(svt_aom_fft4x4_float, svt_aom_fft4x4_float_c);
+     SET_ONLY_C(svt_aom_fft16x16_float, svt_aom_fft16x16_float_c);
+@@ -1186,6 +1189,9 @@ void svt_aom_setup_rtcd_internal(EbCpuFlags flags) {
+     SET_ONLY_C(svt_av1_fwd_txfm2d_64x16_N4, svt_av1_fwd_txfm2d_64x16_N4_c);
+     SET_ONLY_C(svt_av1_fwd_txfm2d_64x32_N4, svt_av1_fwd_txfm2d_64x32_N4_c);
+     SET_ONLY_C(svt_av1_fwd_txfm2d_64x64_N4, svt_aom_transform_two_d_64x64_N4_c);
++#if FTR_LOSSLESS_SUPPORT
++    SET_ONLY_C(svt_av1_fwht4x4, svt_av1_fwht4x4_c);
++#endif
+     SET_ONLY_C(svt_aom_fft2x2_float, svt_aom_fft2x2_float_c);
+     SET_ONLY_C(svt_aom_fft4x4_float, svt_aom_fft4x4_float_c);
+     SET_ONLY_C(svt_aom_fft16x16_float, svt_aom_fft16x16_float_c);
+diff --git a/Source/Lib/Codec/md_config_process.c b/Source/Lib/Codec/md_config_process.c
+index a22adbcf..e31522c1 100644
+--- a/Source/Lib/Codec/md_config_process.c
++++ b/Source/Lib/Codec/md_config_process.c
+@@ -875,26 +875,6 @@ void *svt_aom_mode_decision_configuration_kernel(void *input_ptr) {
+             pcs->ppcs->enable_restoration = 0;
+         }
+ 
+-        // Post the results to the MD processes
+-        uint16_t tg_count = pcs->ppcs->tile_group_cols * pcs->ppcs->tile_group_rows;
+-        for (uint16_t tile_group_idx = 0; tile_group_idx < tg_count; tile_group_idx++) {
+-            svt_get_empty_object(context_ptr->mode_decision_configuration_output_fifo_ptr, &enc_dec_tasks_wrapper);
+-
+-            EncDecTasks *enc_dec_tasks      = (EncDecTasks *)enc_dec_tasks_wrapper->object_ptr;
+-            enc_dec_tasks->pcs_wrapper      = rc_results->pcs_wrapper;
+-            enc_dec_tasks->input_type       = rc_results->superres_recode ? ENCDEC_TASKS_SUPERRES_INPUT
+-                                                                          : ENCDEC_TASKS_MDC_INPUT;
+-            enc_dec_tasks->tile_group_index = tile_group_idx;
+-
+-            // Post the Full Results Object
+-            svt_post_full_object(enc_dec_tasks_wrapper);
+-
+-            if (rc_results->superres_recode) {
+-                // for superres input, only send one task
+-                break;
+-            }
+-        }
+-
+ #if FTR_LOSSLESS_SUPPORT // ---
+         pcs->mimic_only_tx_4x4 = 0;
+         if (frm_hdr->segmentation_params.segmentation_enabled) {
+@@ -960,7 +940,25 @@ void *svt_aom_mode_decision_configuration_kernel(void *input_ptr) {
+             pcs->pic_lpd1_lvl                           = 0;
+         }
+ #endif
++        // Post the results to the MD processes
++        uint16_t tg_count = pcs->ppcs->tile_group_cols * pcs->ppcs->tile_group_rows;
++        for (uint16_t tile_group_idx = 0; tile_group_idx < tg_count; tile_group_idx++) {
++            svt_get_empty_object(context_ptr->mode_decision_configuration_output_fifo_ptr, &enc_dec_tasks_wrapper);
+ 
++            EncDecTasks *enc_dec_tasks      = (EncDecTasks *)enc_dec_tasks_wrapper->object_ptr;
++            enc_dec_tasks->pcs_wrapper      = rc_results->pcs_wrapper;
++            enc_dec_tasks->input_type       = rc_results->superres_recode ? ENCDEC_TASKS_SUPERRES_INPUT
++                                                                          : ENCDEC_TASKS_MDC_INPUT;
++            enc_dec_tasks->tile_group_index = tile_group_idx;
++
++            // Post the Full Results Object
++            svt_post_full_object(enc_dec_tasks_wrapper);
++
++            if (rc_results->superres_recode) {
++                // for superres input, only send one task
++                break;
++            }
++        }
+         // Release Rate Control Results
+         svt_release_object(rc_results_wrapper);
+     }
+-- 
+2.36.0.windows.1
+

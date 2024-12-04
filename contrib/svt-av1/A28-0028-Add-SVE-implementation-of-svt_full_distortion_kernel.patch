@@ -1,0 +1,88 @@
+From 33a2e7143cd0a478d681adc6b6a38cf33f3dc2ef Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Wed, 23 Oct 2024 12:07:13 +0100
+Subject: [PATCH 28/56] Add SVE implementation of
+ svt_full_distortion_kernel16_bits
+
+Reuse the SVE SSE helper functions to write an SVE implementation of
+svt_full_distortion_kernel16_bits and add the corresponding unit tests.
+---
+ Source/Lib/ASM_SVE/highbd_sse_sve.c | 19 +++++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c  |  2 +-
+ Source/Lib/Codec/common_dsp_rtcd.h  |  1 +
+ test/SpatialFullDistortionTest.cc   |  7 +++++++
+ 4 files changed, 28 insertions(+), 1 deletion(-)
+
+diff --git a/Source/Lib/ASM_SVE/highbd_sse_sve.c b/Source/Lib/ASM_SVE/highbd_sse_sve.c
+index 993a3b4e..8b180f9d 100644
+--- a/Source/Lib/ASM_SVE/highbd_sse_sve.c
++++ b/Source/Lib/ASM_SVE/highbd_sse_sve.c
+@@ -197,3 +197,22 @@ int64_t svt_aom_highbd_sse_sve(const uint8_t *src8, int src_stride, const uint8_
+     default: return highbd_sse_wxh_sve(src, src_stride, ref, ref_stride, width, height);
+     }
+ }
++
++uint64_t svt_full_distortion_kernel16_bits_sve(uint8_t *input8, uint32_t input_offset, uint32_t input_stride,
++                                               uint8_t *recon8, int32_t recon_offset, uint32_t recon_stride,
++                                               uint32_t area_width, uint32_t area_height) {
++    uint16_t *input = (uint16_t *)input8;
++    uint16_t *recon = (uint16_t *)recon8;
++    input += input_offset;
++    recon += recon_offset;
++
++    switch (area_width) {
++    case 4: return highbd_sse_4xh_sve(input, input_stride, recon, recon_stride, area_height);
++    case 8: return highbd_sse_8xh_sve(input, input_stride, recon, recon_stride, area_height);
++    case 16: return highbd_sse_16xh_sve(input, input_stride, recon, recon_stride, area_height);
++    case 32: return highbd_sse_32xh_sve(input, input_stride, recon, recon_stride, area_height);
++    case 64: return highbd_sse_64xh_sve(input, input_stride, recon, recon_stride, area_height);
++    case 128: return highbd_sse_128xh_sve(input, input_stride, recon, recon_stride, area_height);
++    default: return highbd_sse_wxh_sve(input, input_stride, recon, recon_stride, area_width, area_height);
++    }
++}
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index de66cac8..79610f4a 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1051,7 +1051,7 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(svt_full_distortion_kernel_cbf_zero32_bits, svt_full_distortion_kernel_cbf_zero32_bits_c, svt_full_distortion_kernel_cbf_zero32_bits_neon);
+     SET_NEON(svt_full_distortion_kernel32_bits, svt_full_distortion_kernel32_bits_c, svt_full_distortion_kernel32_bits_neon);
+     SET_NEON_NEON_DOTPROD(svt_spatial_full_distortion_kernel, svt_spatial_full_distortion_kernel_c, svt_spatial_full_distortion_kernel_neon, svt_spatial_full_distortion_kernel_neon_dotprod);
+-    SET_NEON(svt_full_distortion_kernel16_bits, svt_full_distortion_kernel16_bits_c, svt_full_distortion_kernel16_bits_neon);
++    SET_NEON_SVE(svt_full_distortion_kernel16_bits, svt_full_distortion_kernel16_bits_c, svt_full_distortion_kernel16_bits_neon, svt_full_distortion_kernel16_bits_sve);
+     SET_NEON(svt_residual_kernel8bit, svt_residual_kernel8bit_c, svt_residual_kernel8bit_neon);
+     SET_NEON(svt_residual_kernel16bit, svt_residual_kernel16bit_c, svt_residual_kernel16bit_neon);
+     SET_ONLY_C(svt_picture_average_kernel, svt_picture_average_kernel_c);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index e26e7fd1..4850017a 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1413,6 +1413,7 @@ extern "C" {
+     void svt_aom_paeth_predictor_64x64_neon(uint8_t *dst, ptrdiff_t stride, const uint8_t *above,const uint8_t *left);
+ 
+     uint64_t svt_full_distortion_kernel16_bits_neon(uint8_t* input, uint32_t input_offset, uint32_t input_stride, uint8_t* recon, int32_t recon_offset, uint32_t recon_stride, uint32_t area_width, uint32_t area_height);
++    uint64_t svt_full_distortion_kernel16_bits_sve(uint8_t* input, uint32_t input_offset, uint32_t input_stride, uint8_t* recon, int32_t recon_offset, uint32_t recon_stride, uint32_t area_width, uint32_t area_height);
+     void svt_full_distortion_kernel32_bits_neon(int32_t *coeff, uint32_t coeff_stride, int32_t *recon_coeff, uint32_t recon_coeff_stride, uint64_t distortion_result[DIST_CALC_TOTAL], uint32_t area_width, uint32_t area_height);
+ 
+     void svt_full_distortion_kernel_cbf_zero32_bits_neon(int32_t *coeff, uint32_t coeff_stride,
+diff --git a/test/SpatialFullDistortionTest.cc b/test/SpatialFullDistortionTest.cc
+index cf1b8567..b2d48b9b 100644
+--- a/test/SpatialFullDistortionTest.cc
++++ b/test/SpatialFullDistortionTest.cc
+@@ -480,6 +480,13 @@ INSTANTIATE_TEST_SUITE_P(
+         ::testing::ValuesIn(TEST_AREA_SIZES),
+         ::testing::Values(svt_full_distortion_kernel16_bits_neon)));
+ 
++#if HAVE_SVE
++INSTANTIATE_TEST_SUITE_P(
++    SVE, FullDistortionKernel16BitsFuncTest,
++    ::testing::Combine(
++        ::testing::ValuesIn(TEST_AREA_SIZES),
++        ::testing::Values(svt_full_distortion_kernel16_bits_sve)));
++#endif  // HAVE_SVE
+ #endif
+ 
+ typedef void (*FullDistortionKernel32BitsFunc)(
+-- 
+2.36.0.windows.1
+

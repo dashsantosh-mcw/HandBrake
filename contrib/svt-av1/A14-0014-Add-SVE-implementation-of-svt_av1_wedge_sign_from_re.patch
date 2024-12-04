@@ -1,0 +1,96 @@
+From 97ddda5e433d75874bc801e9e33af050444df847 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Sat, 12 Oct 2024 22:08:27 +0100
+Subject: [PATCH 14/56] Add SVE implementation of
+ svt_av1_wedge_sign_from_residuals
+
+Port the libaom SVE implementation of svt_av1_wedge_sign_from_residuals
+and add the corresponding unit tests.
+---
+ Source/Lib/ASM_SVE/wedge_utils_sve.c | 28 ++++++++++++++++++++++++++++
+ Source/Lib/Codec/aom_dsp_rtcd.c      |  2 +-
+ Source/Lib/Codec/aom_dsp_rtcd.h      |  1 +
+ test/WedgeUtilTest.cc                |  6 ++++++
+ 4 files changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/Source/Lib/ASM_SVE/wedge_utils_sve.c b/Source/Lib/ASM_SVE/wedge_utils_sve.c
+index 4655db8f..ef35ad98 100644
+--- a/Source/Lib/ASM_SVE/wedge_utils_sve.c
++++ b/Source/Lib/ASM_SVE/wedge_utils_sve.c
+@@ -60,3 +60,31 @@ uint64_t svt_av1_wedge_sse_from_residuals_sve(const int16_t *r1, const int16_t *
+     const uint64_t csse = (uint64_t)vaddvq_s64(vaddq_s64(sse[0], sse[1]));
+     return ROUND_POWER_OF_TWO(csse, 2 * WEDGE_WEIGHT_BITS);
+ }
++
++int8_t svt_av1_wedge_sign_from_residuals_sve(const int16_t *ds, const uint8_t *m, int N, int64_t limit) {
++    assert(N % 16 == 0);
++
++    // Predicate pattern with first 8 elements true.
++    svbool_t  pattern = svptrue_pat_b16(SV_VL8);
++    int64x2_t acc_l   = vdupq_n_s64(0);
++    int64x2_t acc_h   = vdupq_n_s64(0);
++
++    do {
++        const int16x8_t ds_l = vld1q_s16(ds);
++        const int16x8_t ds_h = vld1q_s16(ds + 8);
++
++        // Use a zero-extending load to widen the vector elements.
++        const int16x8_t m_l = svget_neonq_s16(svld1ub_s16(pattern, m));
++        const int16x8_t m_h = svget_neonq_s16(svld1ub_s16(pattern, m + 8));
++
++        acc_l = svt_sdotq_s16(acc_l, ds_l, m_l);
++        acc_h = svt_sdotq_s16(acc_h, ds_h, m_h);
++
++        ds += 16;
++        m += 16;
++        N -= 16;
++    } while (N != 0);
++
++    const int64x2_t sum = vaddq_s64(acc_l, acc_h);
++    return vaddvq_s64(sum) > limit;
++}
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.c b/Source/Lib/Codec/aom_dsp_rtcd.c
+index 11d3d58c..6775d6bc 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.c
++++ b/Source/Lib/Codec/aom_dsp_rtcd.c
+@@ -552,7 +552,7 @@ void svt_aom_setup_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(svt_aom_sse, svt_aom_sse_c, svt_aom_sse_neon);
+     SET_NEON(svt_aom_highbd_sse, svt_aom_highbd_sse_c, svt_aom_highbd_sse_neon);
+     SET_NEON(svt_av1_wedge_compute_delta_squares, svt_av1_wedge_compute_delta_squares_c, svt_av1_wedge_compute_delta_squares_neon);
+-    SET_NEON(svt_av1_wedge_sign_from_residuals, svt_av1_wedge_sign_from_residuals_c, svt_av1_wedge_sign_from_residuals_neon);
++    SET_NEON_SVE(svt_av1_wedge_sign_from_residuals, svt_av1_wedge_sign_from_residuals_c, svt_av1_wedge_sign_from_residuals_neon, svt_av1_wedge_sign_from_residuals_sve);
+     SET_NEON(svt_compute_cdef_dist_16bit, svt_aom_compute_cdef_dist_c, svt_aom_compute_cdef_dist_16bit_neon);
+     SET_NEON(svt_compute_cdef_dist_8bit, svt_aom_compute_cdef_dist_8bit_c, svt_aom_compute_cdef_dist_8bit_neon);
+     SET_NEON_SVE(svt_av1_compute_stats, svt_av1_compute_stats_c, svt_av1_compute_stats_neon, svt_av1_compute_stats_sve);
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.h b/Source/Lib/Codec/aom_dsp_rtcd.h
+index d5d0e958..67713b89 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.h
++++ b/Source/Lib/Codec/aom_dsp_rtcd.h
+@@ -1251,6 +1251,7 @@ extern "C" {
+     int64_t svt_aom_highbd_sse_neon(const uint8_t *a8, int a_stride, const uint8_t *b8, int b_stride, int width, int height);
+     int64_t svt_av1_block_error_neon(const TranLow *coeff, const TranLow *dqcoeff, intptr_t block_size, int64_t *ssz);
+     int8_t svt_av1_wedge_sign_from_residuals_neon(const int16_t *ds, const uint8_t *m, int N, int64_t limit);
++    int8_t svt_av1_wedge_sign_from_residuals_sve(const int16_t *ds, const uint8_t *m, int N, int64_t limit);
+     void svt_av1_wedge_compute_delta_squares_neon(int16_t *d, const int16_t *a, const int16_t *b, int N);
+     uint32_t hadamard_path_neon(Buf2D residualBuf, Buf2D coeffBuf, Buf2D inputBuf, Buf2D predBuf, BlockSize bsize);
+ 
+diff --git a/test/WedgeUtilTest.cc b/test/WedgeUtilTest.cc
+index 372d49d1..66f24ebe 100644
+--- a/test/WedgeUtilTest.cc
++++ b/test/WedgeUtilTest.cc
+@@ -180,6 +180,12 @@ INSTANTIATE_TEST_SUITE_P(
+ INSTANTIATE_TEST_SUITE_P(
+     NEON, WedgeSignFromResidualsTest,
+     ::testing::Values(svt_av1_wedge_sign_from_residuals_neon));
++
++#if HAVE_SVE
++INSTANTIATE_TEST_SUITE_P(
++    SVE, WedgeSignFromResidualsTest,
++    ::testing::Values(svt_av1_wedge_sign_from_residuals_sve));
++#endif  // HAVE_SVE
+ #endif  // ARCH_AARCH64
+ 
+ // test svt_av1_wedge_compute_delta_squares
+-- 
+2.36.0.windows.1
+

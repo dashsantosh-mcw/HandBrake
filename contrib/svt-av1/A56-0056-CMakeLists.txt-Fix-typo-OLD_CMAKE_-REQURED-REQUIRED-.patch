@@ -1,0 +1,31 @@
+From 94a1a85ce8acb5b8a4222d6ab3e871e1122ed426 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Wed, 13 Nov 2024 22:59:39 +0000
+Subject: [PATCH 56/56] CMakeLists.txt: Fix typo: OLD_CMAKE_{REQURED =>
+ REQUIRED}_FLAGS
+
+---
+ CMakeLists.txt | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index abaffaca..0666d76d 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -125,11 +125,11 @@ elseif(NOT COMPILE_C_ONLY AND HAVE_ARM_PLATFORM)
+             # against stderr does not recognise the "invalid feature modifier" error
+             # produced by certain versions of GCC, leading to the feature being
+             # incorrectly marked as available.
+-            set(OLD_CMAKE_REQURED_FLAGS ${CMAKE_REQUIRED_FLAGS})
++            set(OLD_CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS})
+             set(CMAKE_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS} ${${flavor}_FLAG}")
+             unset(${flavor}_FLAG_SUPPORTED)
+             check_c_source_compiles("static void function(void) {} ${C_MAIN}" ${flavor}_FLAG_SUPPORTED)
+-            set(CMAKE_REQUIRED_FLAGS ${OLD_CMAKE_REQURED_FLAGS})
++            set(CMAKE_REQUIRED_FLAGS ${OLD_CMAKE_REQUIRED_FLAGS})
+ 
+             if(NOT ${flavor}_FLAG_SUPPORTED)
+               set(ENABLE_${flavor} 0)
+-- 
+2.36.0.windows.1
+

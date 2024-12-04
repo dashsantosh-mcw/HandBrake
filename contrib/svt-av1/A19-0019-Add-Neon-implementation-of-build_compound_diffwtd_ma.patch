@@ -1,0 +1,315 @@
+From 108b271bbc711914a69671f70a08cfe5885d6260 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Fri, 11 Oct 2024 11:43:31 +0100
+Subject: [PATCH 19/56] Add Neon implementation of
+ build_compound_diffwtd_mask_highbd
+
+Port from libaom the Neon implementation of
+svt_av1_build_compound_diffwtd_mask_highbd and add the corresponding
+unit tests.
+---
+ Source/Lib/ASM_NEON/CMakeLists.txt            |   1 +
+ .../ASM_NEON/highbd_inter_prediction_neon.c   | 224 ++++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c            |   2 +-
+ Source/Lib/Codec/common_dsp_rtcd.h            |   1 +
+ test/CompoundUtilTest.cc                      |   9 +-
+ 5 files changed, 235 insertions(+), 2 deletions(-)
+ create mode 100644 Source/Lib/ASM_NEON/highbd_inter_prediction_neon.c
+
+diff --git a/Source/Lib/ASM_NEON/CMakeLists.txt b/Source/Lib/ASM_NEON/CMakeLists.txt
+index a0573177..99b048ce 100644
+--- a/Source/Lib/ASM_NEON/CMakeLists.txt
++++ b/Source/Lib/ASM_NEON/CMakeLists.txt
+@@ -39,6 +39,7 @@ target_sources(
+   PUBLIC transforms_intrin_neon.c
+   PUBLIC hadmard_path_neon.c
+   PUBLIC highbd_fwd_txfm_neon.c
++  PUBLIC highbd_inter_prediction_neon.c
+   PUBLIC highbd_intra_prediction_neon.c
+   PUBLIC highbd_inv_txfm_neon.c
+   PUBLIC highbd_pickrst_neon.c
+diff --git a/Source/Lib/ASM_NEON/highbd_inter_prediction_neon.c b/Source/Lib/ASM_NEON/highbd_inter_prediction_neon.c
+new file mode 100644
+index 00000000..69257aa6
+--- /dev/null
++++ b/Source/Lib/ASM_NEON/highbd_inter_prediction_neon.c
+@@ -0,0 +1,224 @@
++/*
++ * Copyright (c) 2018, Alliance for Open Media. All rights reserved.
++ *
++ * This source code is subject to the terms of the BSD 2 Clause License and
++ * the Alliance for Open Media Patent License 1.0. If the BSD 2 Clause License
++ * was not distributed with this source code in the LICENSE file, you can
++ * obtain it at www.aomedia.org/license/software. If the Alliance for Open
++ * Media Patent License 1.0 was not distributed with this source code in the
++ * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
++ */
++
++#include <arm_neon.h>
++#include <assert.h>
++#include <stdbool.h>
++
++#include "definitions.h"
++#include "common_dsp_rtcd.h"
++#include "mem_neon.h"
++#include "utility.h"
++
++static INLINE void diffwtd_mask_highbd_neon(uint8_t *mask, bool inverse, const uint16_t *src0, int src0_stride,
++                                            const uint16_t *src1, int src1_stride, int h, int w,
++                                            const unsigned int bd) {
++    assert(DIFF_FACTOR > 0);
++    uint8x16_t max_alpha = vdupq_n_u8(AOM_BLEND_A64_MAX_ALPHA);
++    uint8x16_t mask_base = vdupq_n_u8(38);
++    uint8x16_t mask_diff = vdupq_n_u8(AOM_BLEND_A64_MAX_ALPHA - 38);
++
++    if (bd == 8) {
++        if (w >= 16) {
++            do {
++                uint8_t        *mask_ptr = mask;
++                const uint16_t *src0_ptr = src0;
++                const uint16_t *src1_ptr = src1;
++                int             width    = w;
++                do {
++                    uint16x8_t s0_lo = vld1q_u16(src0_ptr);
++                    uint16x8_t s0_hi = vld1q_u16(src0_ptr + 8);
++                    uint16x8_t s1_lo = vld1q_u16(src1_ptr);
++                    uint16x8_t s1_hi = vld1q_u16(src1_ptr + 8);
++
++                    uint16x8_t diff_lo_u16 = vabdq_u16(s0_lo, s1_lo);
++                    uint16x8_t diff_hi_u16 = vabdq_u16(s0_hi, s1_hi);
++                    uint8x8_t  diff_lo_u8  = vshrn_n_u16(diff_lo_u16, DIFF_FACTOR_LOG2);
++                    uint8x8_t  diff_hi_u8  = vshrn_n_u16(diff_hi_u16, DIFF_FACTOR_LOG2);
++                    uint8x16_t diff        = vcombine_u8(diff_lo_u8, diff_hi_u8);
++
++                    uint8x16_t m;
++                    if (inverse) {
++                        m = vqsubq_u8(mask_diff, diff);
++                    } else {
++                        m = vminq_u8(vaddq_u8(diff, mask_base), max_alpha);
++                    }
++
++                    vst1q_u8(mask_ptr, m);
++
++                    src0_ptr += 16;
++                    src1_ptr += 16;
++                    mask_ptr += 16;
++                    width -= 16;
++                } while (width != 0);
++                mask += w;
++                src0 += src0_stride;
++                src1 += src1_stride;
++            } while (--h != 0);
++        } else if (w == 8) {
++            do {
++                uint8_t        *mask_ptr = mask;
++                const uint16_t *src0_ptr = src0;
++                const uint16_t *src1_ptr = src1;
++                int             width    = w;
++                do {
++                    uint16x8_t s0 = vld1q_u16(src0_ptr);
++                    uint16x8_t s1 = vld1q_u16(src1_ptr);
++
++                    uint16x8_t diff_u16 = vabdq_u16(s0, s1);
++                    uint8x8_t  diff_u8  = vshrn_n_u16(diff_u16, DIFF_FACTOR_LOG2);
++                    uint8x8_t  m;
++                    if (inverse) {
++                        m = vqsub_u8(vget_low_u8(mask_diff), diff_u8);
++                    } else {
++                        m = vmin_u8(vadd_u8(diff_u8, vget_low_u8(mask_base)), vget_low_u8(max_alpha));
++                    }
++
++                    vst1_u8(mask_ptr, m);
++
++                    src0_ptr += 8;
++                    src1_ptr += 8;
++                    mask_ptr += 8;
++                    width -= 8;
++                } while (width != 0);
++                mask += w;
++                src0 += src0_stride;
++                src1 += src1_stride;
++            } while (--h != 0);
++        } else if (w == 4) {
++            do {
++                uint16x8_t s0 = load_unaligned_u16_4x2(src0, src0_stride);
++                uint16x8_t s1 = load_unaligned_u16_4x2(src1, src1_stride);
++
++                uint16x8_t diff_u16 = vabdq_u16(s0, s1);
++                uint8x8_t  diff_u8  = vshrn_n_u16(diff_u16, DIFF_FACTOR_LOG2);
++                uint8x8_t  m;
++                if (inverse) {
++                    m = vqsub_u8(vget_low_u8(mask_diff), diff_u8);
++                } else {
++                    m = vmin_u8(vadd_u8(diff_u8, vget_low_u8(mask_base)), vget_low_u8(max_alpha));
++                }
++
++                store_u8x4_strided_x2(mask, w, m);
++
++                src0 += 2 * src0_stride;
++                src1 += 2 * src1_stride;
++                mask += 2 * w;
++                h -= 2;
++            } while (h != 0);
++        }
++    } else if (bd == 10) {
++        if (w >= 16) {
++            do {
++                uint8_t        *mask_ptr = mask;
++                const uint16_t *src0_ptr = src0;
++                const uint16_t *src1_ptr = src1;
++                int             width    = w;
++                do {
++                    uint16x8_t s0_lo = vld1q_u16(src0_ptr);
++                    uint16x8_t s0_hi = vld1q_u16(src0_ptr + 8);
++                    uint16x8_t s1_lo = vld1q_u16(src1_ptr);
++                    uint16x8_t s1_hi = vld1q_u16(src1_ptr + 8);
++
++                    uint16x8_t diff_lo_u16 = vabdq_u16(s0_lo, s1_lo);
++                    uint16x8_t diff_hi_u16 = vabdq_u16(s0_hi, s1_hi);
++                    uint8x8_t  diff_lo_u8  = vshrn_n_u16(diff_lo_u16, 2 + DIFF_FACTOR_LOG2);
++                    uint8x8_t  diff_hi_u8  = vshrn_n_u16(diff_hi_u16, 2 + DIFF_FACTOR_LOG2);
++                    uint8x16_t diff        = vcombine_u8(diff_lo_u8, diff_hi_u8);
++
++                    uint8x16_t m;
++                    if (inverse) {
++                        m = vqsubq_u8(mask_diff, diff);
++                    } else {
++                        m = vminq_u8(vaddq_u8(diff, mask_base), max_alpha);
++                    }
++
++                    vst1q_u8(mask_ptr, m);
++
++                    src0_ptr += 16;
++                    src1_ptr += 16;
++                    mask_ptr += 16;
++                    width -= 16;
++                } while (width != 0);
++                mask += w;
++                src0 += src0_stride;
++                src1 += src1_stride;
++            } while (--h != 0);
++        } else if (w == 8) {
++            do {
++                uint8_t        *mask_ptr = mask;
++                const uint16_t *src0_ptr = src0;
++                const uint16_t *src1_ptr = src1;
++                int             width    = w;
++                do {
++                    uint16x8_t s0 = vld1q_u16(src0_ptr);
++                    uint16x8_t s1 = vld1q_u16(src1_ptr);
++
++                    uint16x8_t diff_u16 = vabdq_u16(s0, s1);
++                    uint8x8_t  diff_u8  = vshrn_n_u16(diff_u16, 2 + DIFF_FACTOR_LOG2);
++                    uint8x8_t  m;
++                    if (inverse) {
++                        m = vqsub_u8(vget_low_u8(mask_diff), diff_u8);
++                    } else {
++                        m = vmin_u8(vadd_u8(diff_u8, vget_low_u8(mask_base)), vget_low_u8(max_alpha));
++                    }
++
++                    vst1_u8(mask_ptr, m);
++
++                    src0_ptr += 8;
++                    src1_ptr += 8;
++                    mask_ptr += 8;
++                    width -= 8;
++                } while (width != 0);
++                mask += w;
++                src0 += src0_stride;
++                src1 += src1_stride;
++            } while (--h != 0);
++        } else if (w == 4) {
++            do {
++                uint16x8_t s0 = load_unaligned_u16_4x2(src0, src0_stride);
++                uint16x8_t s1 = load_unaligned_u16_4x2(src1, src1_stride);
++
++                uint16x8_t diff_u16 = vabdq_u16(s0, s1);
++                uint8x8_t  diff_u8  = vshrn_n_u16(diff_u16, 2 + DIFF_FACTOR_LOG2);
++                uint8x8_t  m;
++                if (inverse) {
++                    m = vqsub_u8(vget_low_u8(mask_diff), diff_u8);
++                } else {
++                    m = vmin_u8(vadd_u8(diff_u8, vget_low_u8(mask_base)), vget_low_u8(max_alpha));
++                }
++
++                store_u8x4_strided_x2(mask, w, m);
++
++                src0 += 2 * src0_stride;
++                src1 += 2 * src1_stride;
++                mask += 2 * w;
++                h -= 2;
++            } while (h != 0);
++        }
++    }
++}
++
++void svt_av1_build_compound_diffwtd_mask_highbd_neon(uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const uint8_t *src0,
++                                                     int src0_stride, const uint8_t *src1, int src1_stride, int h,
++                                                     int w, int bd) {
++    assert(h % 4 == 0);
++    assert(w % 4 == 0);
++    assert(mask_type == DIFFWTD_38_INV || mask_type == DIFFWTD_38);
++
++    if (mask_type == DIFFWTD_38) {
++        diffwtd_mask_highbd_neon(
++            mask, /*inverse=*/false, (uint16_t *)src0, src0_stride, (uint16_t *)src1, src1_stride, h, w, bd);
++    } else { // mask_type == DIFFWTD_38_INV
++        diffwtd_mask_highbd_neon(
++            mask, /*inverse=*/true, (uint16_t *)src0, src0_stride, (uint16_t *)src1, src1_stride, h, w, bd);
++    }
++}
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index ba1f7e66..5abfa00c 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1078,7 +1078,7 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON_NEON_DOTPROD_NEON_I8MM(svt_aom_convolve8_horiz, svt_aom_convolve8_horiz_c, svt_aom_convolve8_horiz_neon, svt_aom_convolve8_horiz_neon_dotprod, svt_aom_convolve8_horiz_neon_i8mm);
+     SET_NEON_NEON_DOTPROD_NEON_I8MM(svt_aom_convolve8_vert, svt_aom_convolve8_vert_c, svt_aom_convolve8_vert_neon, svt_aom_convolve8_vert_neon_dotprod, svt_aom_convolve8_vert_neon_i8mm);
+     SET_NEON(svt_av1_build_compound_diffwtd_mask, svt_av1_build_compound_diffwtd_mask_c, svt_av1_build_compound_diffwtd_mask_neon);
+-    SET_ONLY_C(svt_av1_build_compound_diffwtd_mask_highbd, svt_av1_build_compound_diffwtd_mask_highbd_c);
++    SET_NEON(svt_av1_build_compound_diffwtd_mask_highbd, svt_av1_build_compound_diffwtd_mask_highbd_c, svt_av1_build_compound_diffwtd_mask_highbd_neon);
+     SET_NEON_SVE(svt_av1_wedge_sse_from_residuals, svt_av1_wedge_sse_from_residuals_c, svt_av1_wedge_sse_from_residuals_neon, svt_av1_wedge_sse_from_residuals_sve);
+     SET_NEON(svt_aom_subtract_block, svt_aom_subtract_block_c, svt_aom_subtract_block_neon);
+     SET_ONLY_C(svt_aom_highbd_subtract_block, svt_aom_highbd_subtract_block_c);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index 1d66a3ac..1c662e2d 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1093,6 +1093,7 @@ extern "C" {
+ #ifdef ARCH_AARCH64
+     void svt_av1_build_compound_diffwtd_mask_neon(uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const uint8_t *src0, int src0_stride, const uint8_t *src1, int src1_stride, int h, int w);
+     void svt_av1_build_compound_diffwtd_mask_d16_neon(uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const CONV_BUF_TYPE *src0, int src0_stride, const CONV_BUF_TYPE *src1, int src1_stride, int h, int w, ConvolveParams *conv_params, int bd);
++    void svt_av1_build_compound_diffwtd_mask_highbd_neon(uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const uint8_t *src0, int src0_stride, const uint8_t *src1, int src1_stride, int h, int w, int bd);
+ 
+     void svt_av1_convolve_2d_sr_neon(const uint8_t *src, int32_t src_stride, uint8_t *dst, int32_t dst_stride, int32_t w, int32_t h, InterpFilterParams *filter_params_x, InterpFilterParams *filter_params_y, const int32_t subpel_x_q4, const int32_t subpel_y_q4, ConvolveParams *conv_params);
+ 
+diff --git a/test/CompoundUtilTest.cc b/test/CompoundUtilTest.cc
+index 43749946..81179188 100644
+--- a/test/CompoundUtilTest.cc
++++ b/test/CompoundUtilTest.cc
+@@ -959,7 +959,6 @@ class BuildCompDiffwtdMaskHighbdTest
+   private:
+     SVTRandom rnd_;
+ };
+-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(BuildCompDiffwtdMaskHighbdTest);
+ 
+ TEST_P(BuildCompDiffwtdMaskHighbdTest, MatchTest) {
+     run_test(DIFFWTD_38, 8);
+@@ -982,6 +981,14 @@ INSTANTIATE_TEST_SUITE_P(
+         ::testing::Values(svt_av1_build_compound_diffwtd_mask_highbd_avx2)));
+ #endif  // ARCH_X86_64
+ 
++#ifdef ARCH_AARCH64
++INSTANTIATE_TEST_SUITE_P(
++    NEON, BuildCompDiffwtdMaskHighbdTest,
++    ::testing::Combine(
++        ::testing::Range(BLOCK_4X4, BlockSizeS_ALL),
++        ::testing::Values(svt_av1_build_compound_diffwtd_mask_highbd_neon)));
++#endif  // ARCH_AARCH64
++
+ // test svt_av1_build_compound_diffwtd_mask_d16_avx2
+ typedef void (*BuildCompDiffwtdMaskD16Func)(
+     uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const CONV_BUF_TYPE *src0,
+-- 
+2.36.0.windows.1
+

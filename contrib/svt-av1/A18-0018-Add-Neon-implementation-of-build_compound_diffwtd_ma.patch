@@ -1,0 +1,180 @@
+From 715eb000daffb0d8a3de53716953364364864c76 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Fri, 11 Oct 2024 11:33:20 +0100
+Subject: [PATCH 18/56] Add Neon implementation of
+ build_compound_diffwtd_mask_d16
+
+Port the libaom Neon implementation of
+svt_av1_build_compound_diffwtd_mask_d16 and add the corresponding unit
+tests.
+---
+ Source/Lib/ASM_NEON/inter_prediction_neon.c | 97 +++++++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c          |  2 +-
+ Source/Lib/Codec/common_dsp_rtcd.h          |  1 +
+ test/CompoundUtilTest.cc                    | 10 ++-
+ 4 files changed, 108 insertions(+), 2 deletions(-)
+
+diff --git a/Source/Lib/ASM_NEON/inter_prediction_neon.c b/Source/Lib/ASM_NEON/inter_prediction_neon.c
+index 3897a83b..8958fa9e 100644
+--- a/Source/Lib/ASM_NEON/inter_prediction_neon.c
++++ b/Source/Lib/ASM_NEON/inter_prediction_neon.c
+@@ -18,6 +18,103 @@
+ #include "mem_neon.h"
+ #include "utility.h"
+ 
++static INLINE void diffwtd_mask_d16_neon(uint8_t *mask, const bool inverse, const CONV_BUF_TYPE *src0, int src0_stride,
++                                         const CONV_BUF_TYPE *src1, int src1_stride, int h, int w, int bd) {
++    const int       round     = 2 * FILTER_BITS - ROUND0_BITS - COMPOUND_ROUND1_BITS + (bd - 8);
++    const int16x8_t round_vec = vdupq_n_s16((int16_t)(-round));
++
++    if (w >= 16) {
++        int i = 0;
++        do {
++            int j = 0;
++            do {
++                uint16x8_t s0_lo = vld1q_u16(src0 + j);
++                uint16x8_t s1_lo = vld1q_u16(src1 + j);
++                uint16x8_t s0_hi = vld1q_u16(src0 + j + 8);
++                uint16x8_t s1_hi = vld1q_u16(src1 + j + 8);
++
++                uint16x8_t diff_lo_u16 = vrshlq_u16(vabdq_u16(s0_lo, s1_lo), round_vec);
++                uint16x8_t diff_hi_u16 = vrshlq_u16(vabdq_u16(s0_hi, s1_hi), round_vec);
++                uint8x8_t  diff_lo_u8  = vshrn_n_u16(diff_lo_u16, DIFF_FACTOR_LOG2);
++                uint8x8_t  diff_hi_u8  = vshrn_n_u16(diff_hi_u16, DIFF_FACTOR_LOG2);
++                uint8x16_t diff        = vcombine_u8(diff_lo_u8, diff_hi_u8);
++
++                uint8x16_t m;
++                if (inverse) {
++                    m = vqsubq_u8(vdupq_n_u8(64 - 38), diff); // Saturating to 0
++                } else {
++                    m = vminq_u8(vaddq_u8(diff, vdupq_n_u8(38)), vdupq_n_u8(64));
++                }
++
++                vst1q_u8(mask, m);
++
++                mask += 16;
++                j += 16;
++            } while (j < w);
++            src0 += src0_stride;
++            src1 += src1_stride;
++        } while (++i < h);
++    } else if (w == 8) {
++        int i = 0;
++        do {
++            uint16x8_t s0 = vld1q_u16(src0);
++            uint16x8_t s1 = vld1q_u16(src1);
++
++            uint16x8_t diff_u16 = vrshlq_u16(vabdq_u16(s0, s1), round_vec);
++            uint8x8_t  diff_u8  = vshrn_n_u16(diff_u16, DIFF_FACTOR_LOG2);
++            uint8x8_t  m;
++            if (inverse) {
++                m = vqsub_u8(vdup_n_u8(64 - 38), diff_u8); // Saturating to 0
++            } else {
++                m = vmin_u8(vadd_u8(diff_u8, vdup_n_u8(38)), vdup_n_u8(64));
++            }
++
++            vst1_u8(mask, m);
++
++            mask += 8;
++            src0 += src0_stride;
++            src1 += src1_stride;
++        } while (++i < h);
++    } else if (w == 4) {
++        int i = 0;
++        do {
++            uint16x8_t s0 = vcombine_u16(vld1_u16(src0), vld1_u16(src0 + src0_stride));
++            uint16x8_t s1 = vcombine_u16(vld1_u16(src1), vld1_u16(src1 + src1_stride));
++
++            uint16x8_t diff_u16 = vrshlq_u16(vabdq_u16(s0, s1), round_vec);
++            uint8x8_t  diff_u8  = vshrn_n_u16(diff_u16, DIFF_FACTOR_LOG2);
++            uint8x8_t  m;
++            if (inverse) {
++                m = vqsub_u8(vdup_n_u8(64 - 38), diff_u8); // Saturating to 0
++            } else {
++                m = vmin_u8(vadd_u8(diff_u8, vdup_n_u8(38)), vdup_n_u8(64));
++            }
++
++            vst1_u8(mask, m);
++
++            mask += 8;
++            src0 += 2 * src0_stride;
++            src1 += 2 * src1_stride;
++            i += 2;
++        } while (i < h);
++    }
++}
++
++void svt_av1_build_compound_diffwtd_mask_d16_neon(uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const CONV_BUF_TYPE *src0,
++                                                  int src0_stride, const CONV_BUF_TYPE *src1, int src1_stride, int h,
++                                                  int w, ConvolveParams *conv_params, int bd) {
++    (void)conv_params;
++    assert(h >= 4);
++    assert(w >= 4);
++    assert(mask_type == DIFFWTD_38_INV || mask_type == DIFFWTD_38);
++
++    if (mask_type == DIFFWTD_38) {
++        diffwtd_mask_d16_neon(mask, /*inverse=*/false, src0, src0_stride, src1, src1_stride, h, w, bd);
++    } else { // mask_type == DIFFWTD_38_INV
++        diffwtd_mask_d16_neon(mask, /*inverse=*/true, src0, src0_stride, src1, src1_stride, h, w, bd);
++    }
++}
++
+ static INLINE void diffwtd_mask_neon(uint8_t *mask, const bool inverse, const uint8_t *src0, int src0_stride,
+                                      const uint8_t *src1, int src1_stride, int h, int w) {
+     if (w >= 16) {
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index 0818b07a..ba1f7e66 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1012,7 +1012,7 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(svt_av1_filter_intra_edge_high, svt_av1_filter_intra_edge_high_c, svt_av1_filter_intra_edge_high_neon);
+     SET_NEON(svt_av1_filter_intra_edge, svt_av1_filter_intra_edge_c, svt_av1_filter_intra_edge_neon);
+     SET_ONLY_C(svt_av1_upsample_intra_edge, svt_av1_upsample_intra_edge_c);
+-    SET_ONLY_C(svt_av1_build_compound_diffwtd_mask_d16, svt_av1_build_compound_diffwtd_mask_d16_c);
++    SET_NEON(svt_av1_build_compound_diffwtd_mask_d16, svt_av1_build_compound_diffwtd_mask_d16_c, svt_av1_build_compound_diffwtd_mask_d16_neon);
+     SET_NEON(svt_av1_highbd_wiener_convolve_add_src, svt_av1_highbd_wiener_convolve_add_src_c, svt_av1_highbd_wiener_convolve_add_src_neon);
+     SET_NEON(svt_apply_selfguided_restoration, svt_apply_selfguided_restoration_c, svt_aom_apply_selfguided_restoration_neon);
+     SET_NEON(svt_av1_selfguided_restoration, svt_av1_selfguided_restoration_c, svt_av1_selfguided_restoration_neon);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index 7d6c9afc..1d66a3ac 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1092,6 +1092,7 @@ extern "C" {
+ 
+ #ifdef ARCH_AARCH64
+     void svt_av1_build_compound_diffwtd_mask_neon(uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const uint8_t *src0, int src0_stride, const uint8_t *src1, int src1_stride, int h, int w);
++    void svt_av1_build_compound_diffwtd_mask_d16_neon(uint8_t *mask, DIFFWTD_MASK_TYPE mask_type, const CONV_BUF_TYPE *src0, int src0_stride, const CONV_BUF_TYPE *src1, int src1_stride, int h, int w, ConvolveParams *conv_params, int bd);
+ 
+     void svt_av1_convolve_2d_sr_neon(const uint8_t *src, int32_t src_stride, uint8_t *dst, int32_t dst_stride, int32_t w, int32_t h, InterpFilterParams *filter_params_x, InterpFilterParams *filter_params_y, const int32_t subpel_x_q4, const int32_t subpel_y_q4, ConvolveParams *conv_params);
+ 
+diff --git a/test/CompoundUtilTest.cc b/test/CompoundUtilTest.cc
+index 7397f3f6..43749946 100644
+--- a/test/CompoundUtilTest.cc
++++ b/test/CompoundUtilTest.cc
+@@ -1066,7 +1066,6 @@ class BuildCompDiffwtdMaskD16Test
+     }
+     SVTRandom rnd_;
+ };  // class BuildCompDiffwtdMaskD16Test
+-GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(BuildCompDiffwtdMaskD16Test);
+ 
+ TEST_P(BuildCompDiffwtdMaskD16Test, MatchTest) {
+     run_test();
+@@ -1088,6 +1087,15 @@ INSTANTIATE_TEST_SUITE_P(
+         ::testing::Range(BLOCK_4X4, BlockSizeS_ALL)));
+ #endif  // ARCH_X86_64
+ 
++#ifdef ARCH_AARCH64
++INSTANTIATE_TEST_SUITE_P(
++    NEON, BuildCompDiffwtdMaskD16Test,
++    ::testing::Combine(
++        ::testing::Range(8, 11, 2),
++        ::testing::Values(svt_av1_build_compound_diffwtd_mask_d16_neon),
++        ::testing::Range(BLOCK_4X4, BlockSizeS_ALL)));
++#endif  // ARCH_AARCH64
++
+ typedef int64_t (*AomSseFunc)(const uint8_t *, int, const uint8_t *, int, int,
+                               int);
+ typedef ::testing::tuple<BlockSize, AomSseFunc> AomSseParam;
+-- 
+2.36.0.windows.1
+

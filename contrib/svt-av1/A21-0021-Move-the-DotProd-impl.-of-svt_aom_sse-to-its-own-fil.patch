@@ -1,0 +1,406 @@
+From 6e5927c4e1dcc10f407f98c02668c15d044e7dd8 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Tue, 22 Oct 2024 15:18:11 +0100
+Subject: [PATCH 21/56] Move the DotProd impl. of svt_aom_sse to its own file
+
+svt_aom_sse_neon had some DotProd helpers hidden behind flags, move them
+to a separate neon_dotprod file and create a proper dot-product
+implementation of this function.
+---
+ Source/Lib/ASM_NEON/sse_neon.c                | 105 ---------
+ Source/Lib/ASM_NEON_DOTPROD/CMakeLists.txt    |   1 +
+ .../Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c   | 201 ++++++++++++++++++
+ Source/Lib/Codec/aom_dsp_rtcd.c               |   2 +-
+ Source/Lib/Codec/aom_dsp_rtcd.h               |   1 +
+ test/CompoundUtilTest.cc                      |   7 +
+ 6 files changed, 211 insertions(+), 106 deletions(-)
+ create mode 100644 Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c
+
+diff --git a/Source/Lib/ASM_NEON/sse_neon.c b/Source/Lib/ASM_NEON/sse_neon.c
+index 19dc7e82..83385674 100644
+--- a/Source/Lib/ASM_NEON/sse_neon.c
++++ b/Source/Lib/ASM_NEON/sse_neon.c
+@@ -15,109 +15,6 @@
+ #include "sum_neon.h"
+ #include "transpose_neon.h"
+ 
+-#if defined(__ARM_FEATURE_DOTPROD)
+-
+-static INLINE void sse_16x1_neon(const uint8_t *src, const uint8_t *ref, uint32x4_t *sse) {
+-    uint8x16_t s = vld1q_u8(src);
+-    uint8x16_t r = vld1q_u8(ref);
+-
+-    uint8x16_t abs_diff = vabdq_u8(s, r);
+-
+-    *sse = vdotq_u32(*sse, abs_diff, abs_diff);
+-}
+-
+-static INLINE void sse_8x1_neon(const uint8_t *src, const uint8_t *ref, uint32x2_t *sse) {
+-    uint8x8_t s = vld1_u8(src);
+-    uint8x8_t r = vld1_u8(ref);
+-
+-    uint8x8_t abs_diff = vabd_u8(s, r);
+-
+-    *sse = vdot_u32(*sse, abs_diff, abs_diff);
+-}
+-
+-static INLINE void sse_4x2_neon(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
+-                                uint32x2_t *sse) {
+-    uint8x8_t s = load_unaligned_u8(src, src_stride);
+-    uint8x8_t r = load_unaligned_u8(ref, ref_stride);
+-
+-    uint8x8_t abs_diff = vabd_u8(s, r);
+-
+-    *sse = vdot_u32(*sse, abs_diff, abs_diff);
+-}
+-
+-static INLINE uint32_t sse_8xh_neon(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
+-                                    int height) {
+-    uint32x2_t sse[2] = {vdup_n_u32(0), vdup_n_u32(0)};
+-
+-    int i = height;
+-    do {
+-        sse_8x1_neon(src, ref, &sse[0]);
+-        src += src_stride;
+-        ref += ref_stride;
+-        sse_8x1_neon(src, ref, &sse[1]);
+-        src += src_stride;
+-        ref += ref_stride;
+-        i -= 2;
+-    } while (i != 0);
+-
+-    return vaddvq_u32(vcombine_u32(sse[0], sse[1]));
+-}
+-
+-static INLINE uint32_t sse_4xh_neon(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
+-                                    int height) {
+-    uint32x2_t sse = vdup_n_u32(0);
+-
+-    int i = height;
+-    do {
+-        sse_4x2_neon(src, src_stride, ref, ref_stride, &sse);
+-
+-        src += 2 * src_stride;
+-        ref += 2 * ref_stride;
+-        i -= 2;
+-    } while (i != 0);
+-
+-    return vaddv_u32(sse);
+-}
+-
+-static INLINE uint32_t sse_wxh_neon(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride, int width,
+-                                    int height) {
+-    uint32x2_t sse[2] = {vdup_n_u32(0), vdup_n_u32(0)};
+-    int        i, j;
+-    if ((width & 0x07) && ((width & 0x07) < 5)) {
+-        i = height;
+-        do {
+-            j = 0;
+-            do {
+-                sse_8x1_neon(src + j, ref + j, &sse[0]);
+-                sse_8x1_neon(src + j + src_stride, ref + j + ref_stride, &sse[1]);
+-                j += 8;
+-            } while (j + 4 < width);
+-
+-            sse_4x2_neon(src + j, src_stride, ref + j, ref_stride, &sse[0]);
+-            src += 2 * src_stride;
+-            ref += 2 * ref_stride;
+-            i -= 2;
+-        } while (i != 0);
+-    } else {
+-        i = height;
+-        do {
+-            j = 0;
+-            do {
+-                sse_8x1_neon(src + j, ref + j, &sse[0]);
+-                sse_8x1_neon(src + j + src_stride, ref + j + ref_stride, &sse[1]);
+-                j += 8;
+-            } while (j < width);
+-
+-            src += 2 * src_stride;
+-            ref += 2 * ref_stride;
+-            i -= 2;
+-        } while (i != 0);
+-    }
+-    return vaddvq_u32(vcombine_u32(sse[0], sse[1]));
+-}
+-
+-#else // !defined(__ARM_FEATURE_DOTPROD)
+-
+ static INLINE void sse_16x1_neon(const uint8_t *src, const uint8_t *ref, uint32x4_t *sse) {
+     uint8x16_t s = vld1q_u8(src);
+     uint8x16_t r = vld1q_u8(ref);
+@@ -215,8 +112,6 @@ static INLINE uint32_t sse_wxh_neon(const uint8_t *src, int src_stride, const ui
+     return vaddvq_u32(sse);
+ }
+ 
+-#endif // defined(__ARM_FEATURE_DOTPROD)
+-
+ static INLINE uint32_t sse_128xh_neon(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
+                                       int height) {
+     uint32x4_t sse[2] = {vdupq_n_u32(0), vdupq_n_u32(0)};
+diff --git a/Source/Lib/ASM_NEON_DOTPROD/CMakeLists.txt b/Source/Lib/ASM_NEON_DOTPROD/CMakeLists.txt
+index 060d0b05..f74b9b30 100644
+--- a/Source/Lib/ASM_NEON_DOTPROD/CMakeLists.txt
++++ b/Source/Lib/ASM_NEON_DOTPROD/CMakeLists.txt
+@@ -23,6 +23,7 @@ target_sources(
+   PUBLIC convolve_neon_dotprod.c
+   PUBLIC highbd_variance_neon_dotprod.c
+   PUBLIC jnt_convolve_neon_dotprod.c
++  PUBLIC sse_neon_dotprod.c
+   PUBLIC variance_neon_dotprod.c)
+ 
+ target_include_directories(
+diff --git a/Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c b/Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c
+new file mode 100644
+index 00000000..7f6d0fe4
+--- /dev/null
++++ b/Source/Lib/ASM_NEON_DOTPROD/sse_neon_dotprod.c
+@@ -0,0 +1,201 @@
++/*
++ * Copyright (c) 2023, Alliance for Open Media. All rights reserved
++ *
++ * This source code is subject to the terms of the BSD 2 Clause License and
++ * the Alliance for Open Media Patent License 1.0. If the BSD 2 Clause License
++ * was not distributed with this source code in the LICENSE file, you can
++ * obtain it at www.aomedia.org/license/software. If the Alliance for Open
++ * Media Patent License 1.0 was not distributed with this source code in the
++ * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
++ */
++
++#include <arm_neon.h>
++
++#include "aom_dsp_rtcd.h"
++#include "mem_neon.h"
++
++static INLINE void sse_16x1_neon_dotprod(const uint8_t *src, const uint8_t *ref, uint32x4_t *sse) {
++    uint8x16_t s = vld1q_u8(src);
++    uint8x16_t r = vld1q_u8(ref);
++
++    uint8x16_t abs_diff = vabdq_u8(s, r);
++
++    *sse = vdotq_u32(*sse, abs_diff, abs_diff);
++}
++
++static INLINE void sse_8x1_neon_dotprod(const uint8_t *src, const uint8_t *ref, uint32x2_t *sse) {
++    uint8x8_t s = vld1_u8(src);
++    uint8x8_t r = vld1_u8(ref);
++
++    uint8x8_t abs_diff = vabd_u8(s, r);
++
++    *sse = vdot_u32(*sse, abs_diff, abs_diff);
++}
++
++static INLINE void sse_4x2_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
++                                        uint32x2_t *sse) {
++    uint8x8_t s = load_unaligned_u8(src, src_stride);
++    uint8x8_t r = load_unaligned_u8(ref, ref_stride);
++
++    uint8x8_t abs_diff = vabd_u8(s, r);
++
++    *sse = vdot_u32(*sse, abs_diff, abs_diff);
++}
++
++static INLINE uint32_t sse_wxh_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
++                                            int width, int height) {
++    uint32x2_t sse[2] = {vdup_n_u32(0), vdup_n_u32(0)};
++
++    if ((width & 0x07) && ((width & 0x07) < 5)) {
++        int i = height;
++        do {
++            int j = 0;
++            do {
++                sse_8x1_neon_dotprod(src + j, ref + j, &sse[0]);
++                sse_8x1_neon_dotprod(src + j + src_stride, ref + j + ref_stride, &sse[1]);
++                j += 8;
++            } while (j + 4 < width);
++
++            sse_4x2_neon_dotprod(src + j, src_stride, ref + j, ref_stride, &sse[0]);
++            src += 2 * src_stride;
++            ref += 2 * ref_stride;
++            i -= 2;
++        } while (i != 0);
++    } else {
++        int i = height;
++        do {
++            int j = 0;
++            do {
++                sse_8x1_neon_dotprod(src + j, ref + j, &sse[0]);
++                sse_8x1_neon_dotprod(src + j + src_stride, ref + j + ref_stride, &sse[1]);
++                j += 8;
++            } while (j < width);
++
++            src += 2 * src_stride;
++            ref += 2 * ref_stride;
++            i -= 2;
++        } while (i != 0);
++    }
++    return vaddvq_u32(vcombine_u32(sse[0], sse[1]));
++}
++
++static INLINE uint32_t sse_128xh_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
++                                              int height) {
++    uint32x4_t sse[2] = {vdupq_n_u32(0), vdupq_n_u32(0)};
++
++    int i = height;
++    do {
++        sse_16x1_neon_dotprod(src, ref, &sse[0]);
++        sse_16x1_neon_dotprod(src + 16, ref + 16, &sse[1]);
++        sse_16x1_neon_dotprod(src + 32, ref + 32, &sse[0]);
++        sse_16x1_neon_dotprod(src + 48, ref + 48, &sse[1]);
++        sse_16x1_neon_dotprod(src + 64, ref + 64, &sse[0]);
++        sse_16x1_neon_dotprod(src + 80, ref + 80, &sse[1]);
++        sse_16x1_neon_dotprod(src + 96, ref + 96, &sse[0]);
++        sse_16x1_neon_dotprod(src + 112, ref + 112, &sse[1]);
++
++        src += src_stride;
++        ref += ref_stride;
++    } while (--i != 0);
++
++    return vaddvq_u32(vaddq_u32(sse[0], sse[1]));
++}
++
++static INLINE uint32_t sse_64xh_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
++                                             int height) {
++    uint32x4_t sse[2] = {vdupq_n_u32(0), vdupq_n_u32(0)};
++
++    int i = height;
++    do {
++        sse_16x1_neon_dotprod(src, ref, &sse[0]);
++        sse_16x1_neon_dotprod(src + 16, ref + 16, &sse[1]);
++        sse_16x1_neon_dotprod(src + 32, ref + 32, &sse[0]);
++        sse_16x1_neon_dotprod(src + 48, ref + 48, &sse[1]);
++
++        src += src_stride;
++        ref += ref_stride;
++    } while (--i != 0);
++
++    return vaddvq_u32(vaddq_u32(sse[0], sse[1]));
++}
++
++static INLINE uint32_t sse_32xh_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
++                                             int height) {
++    uint32x4_t sse[2] = {vdupq_n_u32(0), vdupq_n_u32(0)};
++
++    int i = height;
++    do {
++        sse_16x1_neon_dotprod(src, ref, &sse[0]);
++        sse_16x1_neon_dotprod(src + 16, ref + 16, &sse[1]);
++
++        src += src_stride;
++        ref += ref_stride;
++    } while (--i != 0);
++
++    return vaddvq_u32(vaddq_u32(sse[0], sse[1]));
++}
++
++static INLINE uint32_t sse_16xh_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
++                                             int height) {
++    uint32x4_t sse[2] = {vdupq_n_u32(0), vdupq_n_u32(0)};
++
++    int i = height;
++    do {
++        sse_16x1_neon_dotprod(src, ref, &sse[0]);
++        src += src_stride;
++        ref += ref_stride;
++        sse_16x1_neon_dotprod(src, ref, &sse[1]);
++        src += src_stride;
++        ref += ref_stride;
++        i -= 2;
++    } while (i != 0);
++
++    return vaddvq_u32(vaddq_u32(sse[0], sse[1]));
++}
++
++static INLINE uint32_t sse_8xh_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
++                                            int height) {
++    uint32x2_t sse[2] = {vdup_n_u32(0), vdup_n_u32(0)};
++
++    int i = height;
++    do {
++        sse_8x1_neon_dotprod(src, ref, &sse[0]);
++        src += src_stride;
++        ref += ref_stride;
++        sse_8x1_neon_dotprod(src, ref, &sse[1]);
++        src += src_stride;
++        ref += ref_stride;
++        i -= 2;
++    } while (i != 0);
++
++    return vaddvq_u32(vcombine_u32(sse[0], sse[1]));
++}
++
++static INLINE uint32_t sse_4xh_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride,
++                                            int height) {
++    uint32x2_t sse = vdup_n_u32(0);
++
++    int i = height;
++    do {
++        sse_4x2_neon_dotprod(src, src_stride, ref, ref_stride, &sse);
++
++        src += 2 * src_stride;
++        ref += 2 * ref_stride;
++        i -= 2;
++    } while (i != 0);
++
++    return vaddv_u32(sse);
++}
++
++int64_t svt_aom_sse_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride, int width,
++                                 int height) {
++    switch (width) {
++    case 4: return sse_4xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 8: return sse_8xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 16: return sse_16xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 32: return sse_32xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 64: return sse_64xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    case 128: return sse_128xh_neon_dotprod(src, src_stride, ref, ref_stride, height);
++    default: return sse_wxh_neon_dotprod(src, src_stride, ref, ref_stride, width, height);
++    }
++}
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.c b/Source/Lib/Codec/aom_dsp_rtcd.c
+index 6775d6bc..1c4841aa 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.c
++++ b/Source/Lib/Codec/aom_dsp_rtcd.c
+@@ -549,7 +549,7 @@ void svt_aom_setup_rtcd_internal(EbCpuFlags flags) {
+     SET_AVX2(svt_ssim_4x4_hbd, svt_ssim_4x4_hbd_c, svt_ssim_4x4_hbd_avx2);
+ #elif defined ARCH_AARCH64
+     SET_NEON(hadamard_path, hadamard_path_c, hadamard_path_neon);
+-    SET_NEON(svt_aom_sse, svt_aom_sse_c, svt_aom_sse_neon);
++    SET_NEON_NEON_DOTPROD(svt_aom_sse, svt_aom_sse_c, svt_aom_sse_neon, svt_aom_sse_neon_dotprod);
+     SET_NEON(svt_aom_highbd_sse, svt_aom_highbd_sse_c, svt_aom_highbd_sse_neon);
+     SET_NEON(svt_av1_wedge_compute_delta_squares, svt_av1_wedge_compute_delta_squares_c, svt_av1_wedge_compute_delta_squares_neon);
+     SET_NEON_SVE(svt_av1_wedge_sign_from_residuals, svt_av1_wedge_sign_from_residuals_c, svt_av1_wedge_sign_from_residuals_neon, svt_av1_wedge_sign_from_residuals_sve);
+diff --git a/Source/Lib/Codec/aom_dsp_rtcd.h b/Source/Lib/Codec/aom_dsp_rtcd.h
+index 67713b89..ef8cba17 100644
+--- a/Source/Lib/Codec/aom_dsp_rtcd.h
++++ b/Source/Lib/Codec/aom_dsp_rtcd.h
+@@ -1248,6 +1248,7 @@ extern "C" {
+     void svt_copy_mi_map_grid_neon(ModeInfo **mi_grid_ptr, uint32_t mi_stride, uint8_t num_rows, uint8_t num_cols);
+ 
+     int64_t svt_aom_sse_neon(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride, int width, int height);
++    int64_t svt_aom_sse_neon_dotprod(const uint8_t *src, int src_stride, const uint8_t *ref, int ref_stride, int width, int height);
+     int64_t svt_aom_highbd_sse_neon(const uint8_t *a8, int a_stride, const uint8_t *b8, int b_stride, int width, int height);
+     int64_t svt_av1_block_error_neon(const TranLow *coeff, const TranLow *dqcoeff, intptr_t block_size, int64_t *ssz);
+     int8_t svt_av1_wedge_sign_from_residuals_neon(const int16_t *ds, const uint8_t *m, int N, int64_t limit);
+diff --git a/test/CompoundUtilTest.cc b/test/CompoundUtilTest.cc
+index 81179188..a6c737fc 100644
+--- a/test/CompoundUtilTest.cc
++++ b/test/CompoundUtilTest.cc
+@@ -1161,6 +1161,13 @@ INSTANTIATE_TEST_SUITE_P(
+     NEON, AomSseTest,
+     ::testing::Combine(::testing::Range(BLOCK_4X4, BlockSizeS_ALL),
+                        ::testing::Values(svt_aom_sse_neon)));
++
++#if HAVE_NEON_DOTPROD
++INSTANTIATE_TEST_SUITE_P(
++    NEON_DOTPROD, AomSseTest,
++    ::testing::Combine(::testing::Range(BLOCK_4X4, BlockSizeS_ALL),
++                       ::testing::Values(svt_aom_sse_neon_dotprod)));
++#endif  // HAVE_NEON_DOTPROD
+ #endif  // ARCH_AARCH64
+ 
+ class AomSseHighbdTest : public ::testing::TestWithParam<AomSseParam> {
+-- 
+2.36.0.windows.1
+

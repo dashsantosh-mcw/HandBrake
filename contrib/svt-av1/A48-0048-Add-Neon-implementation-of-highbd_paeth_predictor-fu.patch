@@ -1,0 +1,306 @@
+From 7e8afe687ba77dede11deb2bf6ae1771520946a0 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Tue, 15 Oct 2024 10:26:23 +0100
+Subject: [PATCH 48/56] Add Neon implementation of highbd_paeth_predictor
+ functions
+
+Port the libaom Neon implementations of svt_aom_highbd_paeth_predictor
+functions and add the corresponding unit tests.
+---
+ .../ASM_NEON/highbd_intra_prediction_neon.c   | 178 ++++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c            |  38 ++--
+ Source/Lib/Codec/common_dsp_rtcd.h            |  20 ++
+ test/intrapred_test.cc                        |  11 +-
+ 4 files changed, 227 insertions(+), 20 deletions(-)
+
+diff --git a/Source/Lib/ASM_NEON/highbd_intra_prediction_neon.c b/Source/Lib/ASM_NEON/highbd_intra_prediction_neon.c
+index fdc73656..29bde7d6 100644
+--- a/Source/Lib/ASM_NEON/highbd_intra_prediction_neon.c
++++ b/Source/Lib/ASM_NEON/highbd_intra_prediction_neon.c
+@@ -869,3 +869,181 @@ HIGHBD_H_WXH_LARGE(64, 32)
+ HIGHBD_H_WXH_LARGE(64, 64)
+ 
+ #undef HIGHBD_H_WXH_LARGE
++
++// -----------------------------------------------------------------------------
++// PAETH
++
++static INLINE void highbd_paeth_4xh_neon(uint16_t *dest, ptrdiff_t stride, const uint16_t *const top_row,
++                                         const uint16_t *const left_column, int height) {
++    const uint16x8_t top_left    = vdupq_n_u16(top_row[-1]);
++    const uint16x8_t top_left_x2 = vdupq_n_u16(top_row[-1] + top_row[-1]);
++    uint16x8_t       top         = vcombine_u16(vld1_u16(top_row), vld1_u16(top_row));
++
++    for (int y = 0; y < height; y += 2) {
++        const uint16x8_t left = vcombine_u16(vdup_n_u16(left_column[y]), vdup_n_u16(left_column[y + 1]));
++
++        const uint16x8_t left_dist     = vabdq_u16(top, top_left);
++        const uint16x8_t top_dist      = vabdq_u16(left, top_left);
++        const uint16x8_t top_left_dist = vabdq_u16(vaddq_u16(top, left), top_left_x2);
++
++        const uint16x8_t left_le_top      = vcleq_u16(left_dist, top_dist);
++        const uint16x8_t left_le_top_left = vcleq_u16(left_dist, top_left_dist);
++        const uint16x8_t top_le_top_left  = vcleq_u16(top_dist, top_left_dist);
++
++        // if (left_dist <= top_dist && left_dist <= top_left_dist)
++        const uint16x8_t left_mask = vandq_u16(left_le_top, left_le_top_left);
++        //   dest[x] = left_column[y];
++        // Fill all the unused spaces with 'top'. They will be overwritten when
++        // the positions for top_left are known.
++        uint16x8_t result = vbslq_u16(left_mask, left, top);
++        // else if (top_dist <= top_left_dist)
++        //   dest[x] = top_row[x];
++        // Add these values to the mask. They were already set.
++        const uint16x8_t left_or_top_mask = vorrq_u16(left_mask, top_le_top_left);
++        // else
++        //   dest[x] = top_left;
++        result = vbslq_u16(left_or_top_mask, result, top_left);
++
++        vst1_u16(dest, vget_low_u16(result));
++        vst1_u16(dest + stride, vget_high_u16(result));
++        dest += 2 * stride;
++    }
++}
++
++static INLINE void highbd_paeth_8xh_neon(uint16_t *dest, ptrdiff_t stride, const uint16_t *const top_row,
++                                         const uint16_t *const left_column, int height) {
++    const uint16x8_t top_left    = vdupq_n_u16(top_row[-1]);
++    const uint16x8_t top_left_x2 = vdupq_n_u16(top_row[-1] + top_row[-1]);
++    uint16x8_t       top         = vld1q_u16(top_row);
++
++    for (int y = 0; y < height; ++y) {
++        const uint16x8_t left = vdupq_n_u16(left_column[y]);
++
++        const uint16x8_t left_dist     = vabdq_u16(top, top_left);
++        const uint16x8_t top_dist      = vabdq_u16(left, top_left);
++        const uint16x8_t top_left_dist = vabdq_u16(vaddq_u16(top, left), top_left_x2);
++
++        const uint16x8_t left_le_top      = vcleq_u16(left_dist, top_dist);
++        const uint16x8_t left_le_top_left = vcleq_u16(left_dist, top_left_dist);
++        const uint16x8_t top_le_top_left  = vcleq_u16(top_dist, top_left_dist);
++
++        // if (left_dist <= top_dist && left_dist <= top_left_dist)
++        const uint16x8_t left_mask = vandq_u16(left_le_top, left_le_top_left);
++        //   dest[x] = left_column[y];
++        // Fill all the unused spaces with 'top'. They will be overwritten when
++        // the positions for top_left are known.
++        uint16x8_t result = vbslq_u16(left_mask, left, top);
++        // else if (top_dist <= top_left_dist)
++        //   dest[x] = top_row[x];
++        // Add these values to the mask. They were already set.
++        const uint16x8_t left_or_top_mask = vorrq_u16(left_mask, top_le_top_left);
++        // else
++        //   dest[x] = top_left;
++        result = vbslq_u16(left_or_top_mask, result, top_left);
++
++        vst1q_u16(dest, result);
++        dest += stride;
++    }
++}
++
++#define HIGHBD_PAETH_NXM(W, H)                                                                  \
++    void svt_aom_highbd_paeth_predictor_##W##x##H##_neon(                                       \
++        uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left, int bd) { \
++        (void)bd;                                                                               \
++        highbd_paeth_##W##xh_neon(dst, stride, above, left, H);                                 \
++    }
++
++HIGHBD_PAETH_NXM(4, 4)
++HIGHBD_PAETH_NXM(4, 8)
++HIGHBD_PAETH_NXM(4, 16)
++HIGHBD_PAETH_NXM(8, 4)
++HIGHBD_PAETH_NXM(8, 8)
++HIGHBD_PAETH_NXM(8, 16)
++HIGHBD_PAETH_NXM(8, 32)
++
++// Select the closest values and collect them.
++static INLINE uint16x8_t select_paeth(const uint16x8_t top, const uint16x8_t left, const uint16x8_t top_left,
++                                      const uint16x8_t left_le_top, const uint16x8_t left_le_top_left,
++                                      const uint16x8_t top_le_top_left) {
++    // if (left_dist <= top_dist && left_dist <= top_left_dist)
++    const uint16x8_t left_mask = vandq_u16(left_le_top, left_le_top_left);
++    //   dest[x] = left_column[y];
++    // Fill all the unused spaces with 'top'. They will be overwritten when
++    // the positions for top_left are known.
++    const uint16x8_t result = vbslq_u16(left_mask, left, top);
++    // else if (top_dist <= top_left_dist)
++    //   dest[x] = top_row[x];
++    // Add these values to the mask. They were already set.
++    const uint16x8_t left_or_top_mask = vorrq_u16(left_mask, top_le_top_left);
++    // else
++    //   dest[x] = top_left;
++    return vbslq_u16(left_or_top_mask, result, top_left);
++}
++
++static INLINE void paeth_predictor(const uint16x8_t top, const uint16x8_t top_left, const uint16x8_t top_left_x2,
++                                   const uint16x8_t left, const uint16x8_t top_dist, uint16_t *dest) {
++    const uint16x8_t left_dist        = vabdq_u16(top, top_left);
++    const uint16x8_t top_left_dist    = vabdq_u16(vaddq_u16(top, left), top_left_x2);
++    const uint16x8_t left_le_top      = vcleq_u16(left_dist, top_dist);
++    const uint16x8_t left_le_top_left = vcleq_u16(left_dist, top_left_dist);
++    const uint16x8_t top_le_top_left  = vcleq_u16(top_dist, top_left_dist);
++    const uint16x8_t result = select_paeth(top, left, top_left, left_le_top, left_le_top_left, top_le_top_left);
++    vst1q_u16(dest, result);
++}
++
++static INLINE void highbd_paeth_16_plus_x_h_neon(uint16_t *dest, ptrdiff_t stride, const uint16_t *const top_row,
++                                                 const uint16_t *const left_column, int width, int height) {
++    const uint16x8_t top_left    = vdupq_n_u16(top_row[-1]);
++    const uint16x8_t top_left_x2 = vdupq_n_u16(top_row[-1] + top_row[-1]);
++    uint16x8_t       top[8];
++    top[0] = vld1q_u16(top_row + 0 * 8);
++    top[1] = vld1q_u16(top_row + 1 * 8);
++    if (width >= 32) {
++        top[2] = vld1q_u16(top_row + 2 * 8);
++        top[3] = vld1q_u16(top_row + 3 * 8);
++        if (width == 64) {
++            top[4] = vld1q_u16(top_row + 4 * 8);
++            top[5] = vld1q_u16(top_row + 5 * 8);
++            top[6] = vld1q_u16(top_row + 6 * 8);
++            top[7] = vld1q_u16(top_row + 7 * 8);
++        }
++    }
++
++    for (int y = 0; y < height; ++y) {
++        const uint16x8_t left     = vdupq_n_u16(left_column[y]);
++        const uint16x8_t top_dist = vabdq_u16(left, top_left);
++        paeth_predictor(top[0], top_left, top_left_x2, left, top_dist, dest + 0 * 8);
++        paeth_predictor(top[1], top_left, top_left_x2, left, top_dist, dest + 1 * 8);
++        if (width >= 32) {
++            paeth_predictor(top[2], top_left, top_left_x2, left, top_dist, dest + 2 * 8);
++            paeth_predictor(top[3], top_left, top_left_x2, left, top_dist, dest + 3 * 8);
++            if (width == 64) {
++                paeth_predictor(top[4], top_left, top_left_x2, left, top_dist, dest + 4 * 8);
++                paeth_predictor(top[5], top_left, top_left_x2, left, top_dist, dest + 5 * 8);
++                paeth_predictor(top[6], top_left, top_left_x2, left, top_dist, dest + 6 * 8);
++                paeth_predictor(top[7], top_left, top_left_x2, left, top_dist, dest + 7 * 8);
++            }
++        }
++        dest += stride;
++    }
++}
++
++#define HIGHBD_PAETH_NXM_WIDE(W, H)                                                             \
++    void svt_aom_highbd_paeth_predictor_##W##x##H##_neon(                                       \
++        uint16_t *dst, ptrdiff_t stride, const uint16_t *above, const uint16_t *left, int bd) { \
++        (void)bd;                                                                               \
++        highbd_paeth_16_plus_x_h_neon(dst, stride, above, left, W, H);                          \
++    }
++
++HIGHBD_PAETH_NXM_WIDE(16, 4)
++HIGHBD_PAETH_NXM_WIDE(16, 8)
++HIGHBD_PAETH_NXM_WIDE(16, 16)
++HIGHBD_PAETH_NXM_WIDE(16, 32)
++HIGHBD_PAETH_NXM_WIDE(16, 64)
++HIGHBD_PAETH_NXM_WIDE(32, 8)
++HIGHBD_PAETH_NXM_WIDE(32, 16)
++HIGHBD_PAETH_NXM_WIDE(32, 32)
++HIGHBD_PAETH_NXM_WIDE(32, 64)
++HIGHBD_PAETH_NXM_WIDE(64, 16)
++HIGHBD_PAETH_NXM_WIDE(64, 32)
++HIGHBD_PAETH_NXM_WIDE(64, 64)
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index 000bfe67..4b4b5ccb 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1124,25 +1124,25 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(svt_aom_paeth_predictor_64x16, svt_aom_paeth_predictor_64x16_c, svt_aom_paeth_predictor_64x16_neon);
+     SET_NEON(svt_aom_paeth_predictor_64x32, svt_aom_paeth_predictor_64x32_c, svt_aom_paeth_predictor_64x32_neon);
+     SET_NEON(svt_aom_paeth_predictor_64x64, svt_aom_paeth_predictor_64x64_c, svt_aom_paeth_predictor_64x64_neon);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_4x4, svt_aom_highbd_paeth_predictor_4x4_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_4x8, svt_aom_highbd_paeth_predictor_4x8_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_4x16, svt_aom_highbd_paeth_predictor_4x16_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_8x4, svt_aom_highbd_paeth_predictor_8x4_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_8x8, svt_aom_highbd_paeth_predictor_8x8_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_8x16, svt_aom_highbd_paeth_predictor_8x16_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_8x32, svt_aom_highbd_paeth_predictor_8x32_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_16x4, svt_aom_highbd_paeth_predictor_16x4_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_16x8, svt_aom_highbd_paeth_predictor_16x8_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_16x16, svt_aom_highbd_paeth_predictor_16x16_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_16x32, svt_aom_highbd_paeth_predictor_16x32_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_16x64, svt_aom_highbd_paeth_predictor_16x64_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_32x8, svt_aom_highbd_paeth_predictor_32x8_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_32x16, svt_aom_highbd_paeth_predictor_32x16_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_32x32, svt_aom_highbd_paeth_predictor_32x32_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_32x64, svt_aom_highbd_paeth_predictor_32x64_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_64x16, svt_aom_highbd_paeth_predictor_64x16_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_64x32, svt_aom_highbd_paeth_predictor_64x32_c);
+-    SET_ONLY_C(svt_aom_highbd_paeth_predictor_64x64, svt_aom_highbd_paeth_predictor_64x64_c);
++    SET_NEON(svt_aom_highbd_paeth_predictor_4x4, svt_aom_highbd_paeth_predictor_4x4_c, svt_aom_highbd_paeth_predictor_4x4_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_4x8, svt_aom_highbd_paeth_predictor_4x8_c, svt_aom_highbd_paeth_predictor_4x8_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_4x16, svt_aom_highbd_paeth_predictor_4x16_c, svt_aom_highbd_paeth_predictor_4x16_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_8x4, svt_aom_highbd_paeth_predictor_8x4_c, svt_aom_highbd_paeth_predictor_8x4_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_8x8, svt_aom_highbd_paeth_predictor_8x8_c, svt_aom_highbd_paeth_predictor_8x8_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_8x16, svt_aom_highbd_paeth_predictor_8x16_c, svt_aom_highbd_paeth_predictor_8x16_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_8x32, svt_aom_highbd_paeth_predictor_8x32_c, svt_aom_highbd_paeth_predictor_8x32_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_16x4, svt_aom_highbd_paeth_predictor_16x4_c, svt_aom_highbd_paeth_predictor_16x4_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_16x8, svt_aom_highbd_paeth_predictor_16x8_c, svt_aom_highbd_paeth_predictor_16x8_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_16x16, svt_aom_highbd_paeth_predictor_16x16_c, svt_aom_highbd_paeth_predictor_16x16_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_16x32, svt_aom_highbd_paeth_predictor_16x32_c, svt_aom_highbd_paeth_predictor_16x32_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_16x64, svt_aom_highbd_paeth_predictor_16x64_c, svt_aom_highbd_paeth_predictor_16x64_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_32x8, svt_aom_highbd_paeth_predictor_32x8_c, svt_aom_highbd_paeth_predictor_32x8_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_32x16, svt_aom_highbd_paeth_predictor_32x16_c, svt_aom_highbd_paeth_predictor_32x16_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_32x32, svt_aom_highbd_paeth_predictor_32x32_c, svt_aom_highbd_paeth_predictor_32x32_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_32x64, svt_aom_highbd_paeth_predictor_32x64_c, svt_aom_highbd_paeth_predictor_32x64_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_64x16, svt_aom_highbd_paeth_predictor_64x16_c, svt_aom_highbd_paeth_predictor_64x16_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_64x32, svt_aom_highbd_paeth_predictor_64x32_c, svt_aom_highbd_paeth_predictor_64x32_neon);
++    SET_NEON(svt_aom_highbd_paeth_predictor_64x64, svt_aom_highbd_paeth_predictor_64x64_c, svt_aom_highbd_paeth_predictor_64x64_neon);
+     SET_ONLY_C(svt_aom_sum_squares_i16, svt_aom_sum_squares_i16_c);
+ 
+     SET_NEON(svt_aom_dc_predictor_4x4, svt_aom_dc_predictor_4x4_c, svt_aom_dc_predictor_4x4_neon );
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index 11cdb7bf..97bde8bc 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1301,6 +1301,26 @@ extern "C" {
+     void svt_aom_highbd_h_predictor_64x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
+     void svt_aom_highbd_h_predictor_64x64_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
+ 
++    void svt_aom_highbd_paeth_predictor_4x4_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_4x8_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_4x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_8x4_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_8x8_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_8x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_8x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_16x4_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_16x8_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_16x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_16x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_16x64_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_32x8_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_32x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_32x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_32x64_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_64x16_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_64x32_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++    void svt_aom_highbd_paeth_predictor_64x64_neon(uint16_t *dst, ptrdiff_t y_stride, const uint16_t *above, const uint16_t *left, int32_t bd);
++
+     void svt_aom_lpf_vertical_4_neon(uint8_t *src, int stride, const uint8_t *blimit, const uint8_t *limit, const uint8_t *thresh);
+     void svt_aom_lpf_vertical_6_neon(uint8_t *src, int stride, const uint8_t *blimit, const uint8_t *limit, const uint8_t *thresh);
+     void svt_aom_lpf_vertical_8_neon(uint8_t *src, int stride, const uint8_t *blimit, const uint8_t *limit, const uint8_t *thresh);
+diff --git a/test/intrapred_test.cc b/test/intrapred_test.cc
+index 9276cf58..07d3e592 100644
+--- a/test/intrapred_test.cc
++++ b/test/intrapred_test.cc
+@@ -361,7 +361,16 @@ const HBD_PARAMS HighbdIntraPredTestVectorAsmNEON[] = {
+     hbd_entry(h, 16, 64, neon),        hbd_entry(h, 32, 8, neon),
+     hbd_entry(h, 32, 16, neon),        hbd_entry(h, 32, 32, neon),
+     hbd_entry(h, 32, 64, neon),        hbd_entry(h, 64, 16, neon),
+-    hbd_entry(h, 64, 32, neon),        hbd_entry(h, 64, 64, neon)};
++    hbd_entry(h, 64, 32, neon),        hbd_entry(h, 64, 64, neon),
++    hbd_entry(paeth, 4, 8, neon),      hbd_entry(paeth, 4, 16, neon),
++    hbd_entry(paeth, 8, 4, neon),      hbd_entry(paeth, 8, 8, neon),
++    hbd_entry(paeth, 8, 16, neon),     hbd_entry(paeth, 8, 32, neon),
++    hbd_entry(paeth, 16, 4, neon),     hbd_entry(paeth, 16, 8, neon),
++    hbd_entry(paeth, 16, 16, neon),    hbd_entry(paeth, 16, 32, neon),
++    hbd_entry(paeth, 16, 64, neon),    hbd_entry(paeth, 32, 8, neon),
++    hbd_entry(paeth, 32, 16, neon),    hbd_entry(paeth, 32, 32, neon),
++    hbd_entry(paeth, 32, 64, neon),    hbd_entry(paeth, 64, 16, neon),
++    hbd_entry(paeth, 64, 32, neon),    hbd_entry(paeth, 64, 64, neon)};
+ 
+ INSTANTIATE_TEST_SUITE_P(NEON, HighbdIntraPredTest,
+                          ::testing::ValuesIn(HighbdIntraPredTestVectorAsmNEON));
+-- 
+2.36.0.windows.1
+

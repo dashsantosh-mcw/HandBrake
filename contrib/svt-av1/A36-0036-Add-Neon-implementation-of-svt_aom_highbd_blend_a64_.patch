@@ -1,0 +1,233 @@
+From 11c6f55a968f168a86168bf9ef2e3fa96d8b69e2 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Thu, 24 Oct 2024 17:00:51 +0100
+Subject: [PATCH 36/56] Add Neon implementation of
+ svt_aom_highbd_blend_a64_hmask_16bit
+
+Port the libaom Neon implementation of
+svt_aom_highbd_blend_a64_hmask_16bit and add the corresponding unit
+tests.
+---
+ .../Lib/ASM_NEON/highbd_blend_a64_mask_neon.c | 77 +++++++++++++++++++
+ Source/Lib/ASM_NEON/mem_neon.h                | 47 ++++++-----
+ Source/Lib/Codec/common_dsp_rtcd.c            |  2 +-
+ Source/Lib/Codec/common_dsp_rtcd.h            |  1 +
+ test/CompoundUtilTest.cc                      |  7 ++
+ 5 files changed, 112 insertions(+), 22 deletions(-)
+
+diff --git a/Source/Lib/ASM_NEON/highbd_blend_a64_mask_neon.c b/Source/Lib/ASM_NEON/highbd_blend_a64_mask_neon.c
+index f13491cb..539e5068 100644
+--- a/Source/Lib/ASM_NEON/highbd_blend_a64_mask_neon.c
++++ b/Source/Lib/ASM_NEON/highbd_blend_a64_mask_neon.c
+@@ -458,3 +458,80 @@ void svt_aom_highbd_blend_a64_d16_mask_neon(uint8_t *dst_8, uint32_t dst_stride,
+             dst, dst_stride, src0, src0_stride, src1, src1_stride, mask, mask_stride, w, h, subw, subh);
+     }
+ }
++
++static INLINE uint16x4_t alpha_blend_a64_u16x4(uint16x4_t m, uint16x4_t a, uint16x4_t b) {
++    const uint16x4_t m_inv = vsub_u16(vdup_n_u16(AOM_BLEND_A64_MAX_ALPHA), m);
++
++    uint32x4_t blend_u16 = vmull_u16(m, a);
++
++    blend_u16 = vmlal_u16(blend_u16, m_inv, b);
++
++    return vrshrn_n_u32(blend_u16, AOM_BLEND_A64_ROUND_BITS);
++}
++
++void svt_aom_highbd_blend_a64_hmask_16bit_neon(uint16_t *dst, uint32_t dst_stride, const uint16_t *src0,
++                                               uint32_t src0_stride, const uint16_t *src1, uint32_t src1_stride,
++                                               const uint8_t *mask, int w, int h, int bd) {
++    (void)bd;
++
++    assert(IMPLIES(src0 == dst, src0_stride == dst_stride));
++    assert(IMPLIES(src1 == dst, src1_stride == dst_stride));
++
++    assert(h >= 1);
++    assert(w >= 1);
++    assert(IS_POWER_OF_TWO(h));
++    assert(IS_POWER_OF_TWO(w));
++
++    assert(bd == 8 || bd == 10 || bd == 12);
++
++    if (w >= 8) {
++        do {
++            int i = 0;
++            do {
++                uint16x8_t m0 = vmovl_u8(vld1_u8(mask + i));
++                uint16x8_t s0 = vld1q_u16(src0 + i);
++                uint16x8_t s1 = vld1q_u16(src1 + i);
++
++                uint16x8_t blend = alpha_blend_a64_u16x8(m0, s0, s1);
++
++                vst1q_u16(dst + i, blend);
++                i += 8;
++            } while (i < w);
++
++            src0 += src0_stride;
++            src1 += src1_stride;
++            dst += dst_stride;
++        } while (--h != 0);
++    } else if (w == 4) {
++        const uint16x8_t m0 = vmovl_u8(load_unaligned_dup_u8_4x2(mask));
++        do {
++            uint16x8_t s0 = load_unaligned_u16_4x2(src0, src0_stride);
++            uint16x8_t s1 = load_unaligned_u16_4x2(src1, src1_stride);
++
++            uint16x8_t blend = alpha_blend_a64_u16x8(m0, s0, s1);
++
++            store_u16x4_strided_x2(dst, dst_stride, blend);
++
++            src0 += 2 * src0_stride;
++            src1 += 2 * src1_stride;
++            dst += 2 * dst_stride;
++            h -= 2;
++        } while (h != 0);
++    } else {
++        assert(w == 2);
++        const uint16x4_t m0 = vget_low_u16(vmovl_u8(load_unaligned_dup_u8_2x4(mask)));
++        do {
++            uint16x4_t s0 = load_unaligned_u16_2x2(src0, src0_stride);
++            uint16x4_t s1 = load_unaligned_u16_2x2(src1, src1_stride);
++
++            uint16x4_t blend = alpha_blend_a64_u16x4(m0, s0, s1);
++
++            store_u16x2_strided_x2(dst, dst_stride, blend);
++
++            src0 += 2 * src0_stride;
++            src1 += 2 * src1_stride;
++            dst += 2 * dst_stride;
++            h -= 2;
++        } while (h != 0);
++    }
++}
+diff --git a/Source/Lib/ASM_NEON/mem_neon.h b/Source/Lib/ASM_NEON/mem_neon.h
+index 09eaae9a..02a286df 100644
+--- a/Source/Lib/ASM_NEON/mem_neon.h
++++ b/Source/Lib/ASM_NEON/mem_neon.h
+@@ -527,21 +527,30 @@ static INLINE void store_s16_4x4(int16_t *s, ptrdiff_t dst_stride, const int16x4
+     vst1_s16(s, s3);
+ }
+ 
+-/* These intrinsics require immediate values, so we must use #defines
+-   to enforce that. */
+-#define store_s16_2x1_lane(s, s0, lane) \
+-    do { vst1_lane_s32((int32_t *)(s), vreinterpret_s32_s16(s0), lane); } while (0)
+-#define store_u16_2x1_lane(s, s0, lane) \
+-    do { vst1_lane_u32((uint32_t *)(s), vreinterpret_u32_u16(s0), lane); } while (0)
+-#define store_u16q_2x1_lane(s, s0, lane) \
+-    do { vst1q_lane_u32((uint32_t *)(s), vreinterpretq_u32_u16(s0), lane); } while (0)
+-
+ static INLINE void store_s16_8x2(int16_t *s, ptrdiff_t dst_stride, const int16x8_t s0, const int16x8_t s1) {
+     vst1q_s16(s, s0);
+     s += dst_stride;
+     vst1q_s16(s, s1);
+ }
+ 
++#define store_u16_2x1_lane(dst, src, lane)                           \
++    do {                                                             \
++        uint32_t a = vget_lane_u32(vreinterpret_u32_u16(src), lane); \
++        memcpy(dst, &a, 4);                                          \
++    } while (0)
++
++#define store_u16_4x1_lane(dst, src, lane)                             \
++    do {                                                               \
++        uint64_t a = vgetq_lane_u64(vreinterpretq_u64_u16(src), lane); \
++        memcpy(dst, &a, 8);                                            \
++    } while (0)
++
++#define store_s16_4x1_lane(dst, src, lane)                            \
++    do {                                                              \
++        int64_t a = vgetq_lane_s64(vreinterpretq_s64_s16(src), lane); \
++        memcpy(dst, &a, 8);                                           \
++    } while (0)
++
+ // Store the low 32-bits from a single vector.
+ static INLINE void store_u16_2x1(uint16_t *dst, const uint16x4_t src) { store_u16_2x1_lane(dst, src, 0); }
+ 
+@@ -1184,18 +1193,6 @@ static inline void store_u8x2_strided_x2(uint8_t *dst, uint32_t dst_stride, uint
+ #undef store_u8_4x1_lane
+ #undef store_u8_2x1_lane
+ 
+-#define store_u16_4x1_lane(dst, src, lane)                             \
+-    do {                                                               \
+-        uint64_t a = vgetq_lane_u64(vreinterpretq_u64_u16(src), lane); \
+-        memcpy(dst, &a, 8);                                            \
+-    } while (0)
+-
+-#define store_s16_4x1_lane(dst, src, lane)                            \
+-    do {                                                              \
+-        int64_t a = vgetq_lane_s64(vreinterpretq_s64_s16(src), lane); \
+-        memcpy(dst, &a, 8);                                           \
+-    } while (0)
+-
+ // Store two blocks of 64-bits from a single vector.
+ static INLINE void store_s16x4_strided_x2(int16_t *dst, int32_t dst_stride, int16x8_t src) {
+     store_s16_4x1_lane(dst, src, 0);
+@@ -1203,6 +1200,13 @@ static INLINE void store_s16x4_strided_x2(int16_t *dst, int32_t dst_stride, int1
+     store_s16_4x1_lane(dst, src, 1);
+ }
+ 
++// Store two blocks of 32-bits from a single vector.
++static inline void store_u16x2_strided_x2(uint16_t *dst, uint32_t dst_stride, uint16x4_t src) {
++    store_u16_2x1_lane(dst, src, 0);
++    dst += dst_stride;
++    store_u16_2x1_lane(dst, src, 1);
++}
++
+ // Store two blocks of 64-bits from a single vector.
+ static INLINE void store_u16x4_strided_x2(uint16_t *dst, uint32_t dst_stride, uint16x8_t src) {
+     store_u16_4x1_lane(dst, src, 0);
+@@ -1210,6 +1214,7 @@ static INLINE void store_u16x4_strided_x2(uint16_t *dst, uint32_t dst_stride, ui
+     store_u16_4x1_lane(dst, src, 1);
+ }
+ 
++#undef store_u16_2x1_lane
+ #undef store_u16_4x1_lane
+ #undef store_s16_4x1_lane
+ 
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index 4da5ca21..46008a2e 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1000,7 +1000,7 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(svt_aom_lowbd_blend_a64_d16_mask, svt_aom_lowbd_blend_a64_d16_mask_c, svt_aom_lowbd_blend_a64_d16_mask_neon);
+     SET_NEON(svt_aom_highbd_blend_a64_mask, svt_aom_highbd_blend_a64_mask_c, svt_aom_highbd_blend_a64_mask_neon);
+     SET_ONLY_C(svt_aom_highbd_blend_a64_vmask_16bit, svt_aom_highbd_blend_a64_vmask_16bit_c);
+-    SET_ONLY_C(svt_aom_highbd_blend_a64_hmask_16bit, svt_aom_highbd_blend_a64_hmask_16bit_c);
++    SET_NEON(svt_aom_highbd_blend_a64_hmask_16bit, svt_aom_highbd_blend_a64_hmask_16bit_c, svt_aom_highbd_blend_a64_hmask_16bit_neon);
+     SET_NEON(svt_aom_highbd_blend_a64_d16_mask, svt_aom_highbd_blend_a64_d16_mask_c, svt_aom_highbd_blend_a64_d16_mask_neon);
+     SET_NEON(svt_cfl_predict_lbd, svt_cfl_predict_lbd_c, svt_aom_cfl_predict_lbd_neon);
+     SET_ONLY_C(svt_cfl_predict_hbd, svt_cfl_predict_hbd_c);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index 343c376b..f824cf2f 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1161,6 +1161,7 @@ extern "C" {
+ 
+     void svt_aom_highbd_blend_a64_mask_neon(uint8_t *dst, uint32_t dst_stride, const uint8_t *src0, uint32_t src0_stride, const uint8_t *src1, uint32_t src1_stride, const uint8_t *mask, uint32_t mask_stride, int w, int h, int subx, int suby, int bd);
+     void svt_aom_highbd_blend_a64_d16_mask_neon(uint8_t *dst, uint32_t dst_stride, const CONV_BUF_TYPE *src0, uint32_t src0_stride, const CONV_BUF_TYPE *src1, uint32_t src1_stride, const uint8_t *mask, uint32_t mask_stride, int w, int h, int subx, int suby, ConvolveParams *conv_params, const int bd);
++    void svt_aom_highbd_blend_a64_hmask_16bit_neon(uint16_t *dst, uint32_t dst_stride, const uint16_t *src0, uint32_t src0_stride, const uint16_t *src1, uint32_t src1_stride, const uint8_t *mask, int w, int h, int bd);
+ 
+     void svt_av1_selfguided_restoration_neon(const uint8_t *dat8, int32_t width, int32_t height, int32_t stride, int32_t *flt0, int32_t *flt1, int32_t flt_stride, int32_t sgr_params_idx, int32_t bit_depth, int32_t highbd);
+ 
+diff --git a/test/CompoundUtilTest.cc b/test/CompoundUtilTest.cc
+index 0a3e7414..a5cdb87f 100644
+--- a/test/CompoundUtilTest.cc
++++ b/test/CompoundUtilTest.cc
+@@ -638,6 +638,13 @@ INSTANTIATE_TEST_SUITE_P(AVX2, HbdCompBlendHMaskTest,
+                              svt_av1_highbd_blend_a64_hmask_16bit_avx2)}));
+ #endif  // ARCH_X86_64
+ 
++#ifdef ARCH_AARCH64
++INSTANTIATE_TEST_SUITE_P(NEON, HbdCompBlendHMaskTest,
++                         ::testing::ValuesIn({make_tuple(
++                             svt_aom_highbd_blend_a64_hmask_16bit_c,
++                             svt_aom_highbd_blend_a64_hmask_16bit_neon)}));
++#endif  // ARCH_AARCH64
++
+ using HbdBlendA64VMaskFunc = void (*)(uint16_t *, uint32_t, const uint16_t *,
+                                       uint32_t, const uint16_t *, uint32_t,
+                                       const uint8_t *, int, int, int);
+-- 
+2.36.0.windows.1
+

@@ -1,0 +1,867 @@
+From c09f58545d98d28da5f81ad98b8c9da70bd50de8 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Tue, 8 Oct 2024 14:44:59 +0100
+Subject: [PATCH 03/56] Add Neon implementation of highbd_warp_affine
+
+Port from libaom the Neon implementation of svt_av1_highbd_warp_affine
+and add the corresponding tests.
+
+Some helper functions have been put in a separate header file in
+preparation for adding an SVE implementation.
+---
+ Source/Lib/ASM_NEON/CMakeLists.txt           |   1 +
+ Source/Lib/ASM_NEON/highbd_warp_plane_neon.c | 279 +++++++++++
+ Source/Lib/ASM_NEON/highbd_warp_plane_neon.h | 499 +++++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c           |   2 +-
+ Source/Lib/Codec/common_dsp_rtcd.h           |   2 +
+ test/warp_filter_test.cc                     |   4 +
+ 6 files changed, 786 insertions(+), 1 deletion(-)
+ create mode 100644 Source/Lib/ASM_NEON/highbd_warp_plane_neon.c
+ create mode 100644 Source/Lib/ASM_NEON/highbd_warp_plane_neon.h
+
+diff --git a/Source/Lib/ASM_NEON/CMakeLists.txt b/Source/Lib/ASM_NEON/CMakeLists.txt
+index 56c6dbad..0cc80a30 100644
+--- a/Source/Lib/ASM_NEON/CMakeLists.txt
++++ b/Source/Lib/ASM_NEON/CMakeLists.txt
+@@ -31,6 +31,7 @@ target_sources(
+   PUBLIC convolve_neon.c
+   PUBLIC highbd_jnt_convolve_neon.c
+   PUBLIC highbd_convolve_neon.c
++  PUBLIC highbd_warp_plane_neon.c
+   PUBLIC dav1d_asm.S
+   PUBLIC dav1d_util.S
+   PUBLIC deblocking_filter_intrinsic_neon.c
+diff --git a/Source/Lib/ASM_NEON/highbd_warp_plane_neon.c b/Source/Lib/ASM_NEON/highbd_warp_plane_neon.c
+new file mode 100644
+index 00000000..e26f548a
+--- /dev/null
++++ b/Source/Lib/ASM_NEON/highbd_warp_plane_neon.c
+@@ -0,0 +1,279 @@
++/*
++ * Copyright (c) 2023, Alliance for Open Media. All rights reserved.
++ *
++ * This source code is subject to the terms of the BSD 2 Clause License and
++ * the Alliance for Open Media Patent License 1.0. If the BSD 2 Clause License
++ * was not distributed with this source code in the LICENSE file, you can
++ * obtain it at www.aomedia.org/license/software. If the Alliance for Open
++ * Media Patent License 1.0 was not distributed with this source code in the
++ * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
++ */
++
++#include <arm_neon.h>
++#include <assert.h>
++#include <stdbool.h>
++
++#include "common_dsp_rtcd.h"
++#include "definitions.h"
++#include "highbd_warp_plane_neon.h"
++#include "mem_neon.h"
++#include "sum_neon.h"
++#include "transpose_neon.h"
++#include "utility.h"
++#include "warped_motion.h"
++
++static AOM_FORCE_INLINE int16x8_t highbd_horizontal_filter_4x1_f4(int16x8_t rv0, int16x8_t rv1, int16x8_t rv2,
++                                                                  int16x8_t rv3, int bd, int sx, int alpha) {
++    int16x8_t f[4];
++    load_filters_4(f, sx, alpha);
++
++    int32x4_t m0 = vmull_s16(vget_low_s16(f[0]), vget_low_s16(rv0));
++    m0           = vmlal_s16(m0, vget_high_s16(f[0]), vget_high_s16(rv0));
++    int32x4_t m1 = vmull_s16(vget_low_s16(f[1]), vget_low_s16(rv1));
++    m1           = vmlal_s16(m1, vget_high_s16(f[1]), vget_high_s16(rv1));
++    int32x4_t m2 = vmull_s16(vget_low_s16(f[2]), vget_low_s16(rv2));
++    m2           = vmlal_s16(m2, vget_high_s16(f[2]), vget_high_s16(rv2));
++    int32x4_t m3 = vmull_s16(vget_low_s16(f[3]), vget_low_s16(rv3));
++    m3           = vmlal_s16(m3, vget_high_s16(f[3]), vget_high_s16(rv3));
++
++    int32x4_t m0123[] = {m0, m1, m2, m3};
++
++    const int offset_const = (1 << (bd + FILTER_BITS - 1)) + (1 << (ROUND0_BITS - 1));
++
++    int32x4_t res = horizontal_add_4d_s32x4(m0123);
++    res           = vaddq_s32(res, vdupq_n_s32(offset_const));
++    return vcombine_s16(vshrn_n_s32(res, ROUND0_BITS), vdup_n_s16(0));
++}
++
++static AOM_FORCE_INLINE int16x8_t highbd_horizontal_filter_8x1_f8(int16x8_t rv0, int16x8_t rv1, int16x8_t rv2,
++                                                                  int16x8_t rv3, int16x8_t rv4, int16x8_t rv5,
++                                                                  int16x8_t rv6, int16x8_t rv7, int bd, int sx,
++                                                                  int alpha) {
++    int16x8_t f[8];
++    load_filters_8(f, sx, alpha);
++
++    int32x4_t m0 = vmull_s16(vget_low_s16(f[0]), vget_low_s16(rv0));
++    m0           = vmlal_s16(m0, vget_high_s16(f[0]), vget_high_s16(rv0));
++    int32x4_t m1 = vmull_s16(vget_low_s16(f[1]), vget_low_s16(rv1));
++    m1           = vmlal_s16(m1, vget_high_s16(f[1]), vget_high_s16(rv1));
++    int32x4_t m2 = vmull_s16(vget_low_s16(f[2]), vget_low_s16(rv2));
++    m2           = vmlal_s16(m2, vget_high_s16(f[2]), vget_high_s16(rv2));
++    int32x4_t m3 = vmull_s16(vget_low_s16(f[3]), vget_low_s16(rv3));
++    m3           = vmlal_s16(m3, vget_high_s16(f[3]), vget_high_s16(rv3));
++    int32x4_t m4 = vmull_s16(vget_low_s16(f[4]), vget_low_s16(rv4));
++    m4           = vmlal_s16(m4, vget_high_s16(f[4]), vget_high_s16(rv4));
++    int32x4_t m5 = vmull_s16(vget_low_s16(f[5]), vget_low_s16(rv5));
++    m5           = vmlal_s16(m5, vget_high_s16(f[5]), vget_high_s16(rv5));
++    int32x4_t m6 = vmull_s16(vget_low_s16(f[6]), vget_low_s16(rv6));
++    m6           = vmlal_s16(m6, vget_high_s16(f[6]), vget_high_s16(rv6));
++    int32x4_t m7 = vmull_s16(vget_low_s16(f[7]), vget_low_s16(rv7));
++    m7           = vmlal_s16(m7, vget_high_s16(f[7]), vget_high_s16(rv7));
++
++    int32x4_t m0123[] = {m0, m1, m2, m3};
++    int32x4_t m4567[] = {m4, m5, m6, m7};
++
++    const int offset_const = (1 << (bd + FILTER_BITS - 1)) + (1 << (ROUND0_BITS - 1));
++
++    int32x4_t res0 = horizontal_add_4d_s32x4(m0123);
++    int32x4_t res1 = horizontal_add_4d_s32x4(m4567);
++    res0           = vaddq_s32(res0, vdupq_n_s32(offset_const));
++    res1           = vaddq_s32(res1, vdupq_n_s32(offset_const));
++    return vcombine_s16(vshrn_n_s32(res0, ROUND0_BITS), vshrn_n_s32(res1, ROUND0_BITS));
++}
++
++static AOM_FORCE_INLINE int16x8_t highbd_horizontal_filter_4x1_f1(int16x8_t rv0, int16x8_t rv1, int16x8_t rv2,
++                                                                  int16x8_t rv3, int bd, int sx) {
++    int16x8_t f = load_filters_1(sx);
++
++    int32x4_t m0 = vmull_s16(vget_low_s16(f), vget_low_s16(rv0));
++    m0           = vmlal_s16(m0, vget_high_s16(f), vget_high_s16(rv0));
++    int32x4_t m1 = vmull_s16(vget_low_s16(f), vget_low_s16(rv1));
++    m1           = vmlal_s16(m1, vget_high_s16(f), vget_high_s16(rv1));
++    int32x4_t m2 = vmull_s16(vget_low_s16(f), vget_low_s16(rv2));
++    m2           = vmlal_s16(m2, vget_high_s16(f), vget_high_s16(rv2));
++    int32x4_t m3 = vmull_s16(vget_low_s16(f), vget_low_s16(rv3));
++    m3           = vmlal_s16(m3, vget_high_s16(f), vget_high_s16(rv3));
++
++    int32x4_t m0123[] = {m0, m1, m2, m3};
++
++    const int offset_const = (1 << (bd + FILTER_BITS - 1)) + (1 << (ROUND0_BITS - 1));
++
++    int32x4_t res = horizontal_add_4d_s32x4(m0123);
++    res           = vaddq_s32(res, vdupq_n_s32(offset_const));
++    return vcombine_s16(vshrn_n_s32(res, ROUND0_BITS), vdup_n_s16(0));
++}
++
++static AOM_FORCE_INLINE int16x8_t highbd_horizontal_filter_8x1_f1(int16x8_t rv0, int16x8_t rv1, int16x8_t rv2,
++                                                                  int16x8_t rv3, int16x8_t rv4, int16x8_t rv5,
++                                                                  int16x8_t rv6, int16x8_t rv7, int bd, int sx) {
++    int16x8_t f = load_filters_1(sx);
++
++    int32x4_t m0 = vmull_s16(vget_low_s16(f), vget_low_s16(rv0));
++    m0           = vmlal_s16(m0, vget_high_s16(f), vget_high_s16(rv0));
++    int32x4_t m1 = vmull_s16(vget_low_s16(f), vget_low_s16(rv1));
++    m1           = vmlal_s16(m1, vget_high_s16(f), vget_high_s16(rv1));
++    int32x4_t m2 = vmull_s16(vget_low_s16(f), vget_low_s16(rv2));
++    m2           = vmlal_s16(m2, vget_high_s16(f), vget_high_s16(rv2));
++    int32x4_t m3 = vmull_s16(vget_low_s16(f), vget_low_s16(rv3));
++    m3           = vmlal_s16(m3, vget_high_s16(f), vget_high_s16(rv3));
++    int32x4_t m4 = vmull_s16(vget_low_s16(f), vget_low_s16(rv4));
++    m4           = vmlal_s16(m4, vget_high_s16(f), vget_high_s16(rv4));
++    int32x4_t m5 = vmull_s16(vget_low_s16(f), vget_low_s16(rv5));
++    m5           = vmlal_s16(m5, vget_high_s16(f), vget_high_s16(rv5));
++    int32x4_t m6 = vmull_s16(vget_low_s16(f), vget_low_s16(rv6));
++    m6           = vmlal_s16(m6, vget_high_s16(f), vget_high_s16(rv6));
++    int32x4_t m7 = vmull_s16(vget_low_s16(f), vget_low_s16(rv7));
++    m7           = vmlal_s16(m7, vget_high_s16(f), vget_high_s16(rv7));
++
++    int32x4_t m0123[] = {m0, m1, m2, m3};
++    int32x4_t m4567[] = {m4, m5, m6, m7};
++
++    const int offset_const = (1 << (bd + FILTER_BITS - 1)) + (1 << (ROUND0_BITS - 1));
++
++    int32x4_t res0 = horizontal_add_4d_s32x4(m0123);
++    int32x4_t res1 = horizontal_add_4d_s32x4(m4567);
++    res0           = vaddq_s32(res0, vdupq_n_s32(offset_const));
++    res1           = vaddq_s32(res1, vdupq_n_s32(offset_const));
++    return vcombine_s16(vshrn_n_s32(res0, ROUND0_BITS), vshrn_n_s32(res1, ROUND0_BITS));
++}
++
++static AOM_FORCE_INLINE int32x4_t vertical_filter_4x1_f1(const int16x8_t *tmp, int sy) {
++    const int16x8_t f     = load_filters_1(sy);
++    const int16x4_t f0123 = vget_low_s16(f);
++    const int16x4_t f4567 = vget_high_s16(f);
++
++    int32x4_t m0123 = vmull_lane_s16(vget_low_s16(tmp[0]), f0123, 0);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[1]), f0123, 1);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[2]), f0123, 2);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[3]), f0123, 3);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[4]), f4567, 0);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[5]), f4567, 1);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[6]), f4567, 2);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[7]), f4567, 3);
++    return m0123;
++}
++
++static AOM_FORCE_INLINE int32x4x2_t vertical_filter_8x1_f1(const int16x8_t *tmp, int sy) {
++    const int16x8_t f     = load_filters_1(sy);
++    const int16x4_t f0123 = vget_low_s16(f);
++    const int16x4_t f4567 = vget_high_s16(f);
++
++    int32x4_t m0123 = vmull_lane_s16(vget_low_s16(tmp[0]), f0123, 0);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[1]), f0123, 1);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[2]), f0123, 2);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[3]), f0123, 3);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[4]), f4567, 0);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[5]), f4567, 1);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[6]), f4567, 2);
++    m0123           = vmlal_lane_s16(m0123, vget_low_s16(tmp[7]), f4567, 3);
++
++    int32x4_t m4567 = vmull_lane_s16(vget_high_s16(tmp[0]), f0123, 0);
++    m4567           = vmlal_lane_s16(m4567, vget_high_s16(tmp[1]), f0123, 1);
++    m4567           = vmlal_lane_s16(m4567, vget_high_s16(tmp[2]), f0123, 2);
++    m4567           = vmlal_lane_s16(m4567, vget_high_s16(tmp[3]), f0123, 3);
++    m4567           = vmlal_lane_s16(m4567, vget_high_s16(tmp[4]), f4567, 0);
++    m4567           = vmlal_lane_s16(m4567, vget_high_s16(tmp[5]), f4567, 1);
++    m4567           = vmlal_lane_s16(m4567, vget_high_s16(tmp[6]), f4567, 2);
++    m4567           = vmlal_lane_s16(m4567, vget_high_s16(tmp[7]), f4567, 3);
++    return (int32x4x2_t){{m0123, m4567}};
++}
++
++static AOM_FORCE_INLINE int32x4_t vertical_filter_4x1_f4(const int16x8_t *tmp, int sy, int gamma) {
++    int16x8_t s0, s1, s2, s3;
++    transpose_elems_s16_4x8(vget_low_s16(tmp[0]),
++                            vget_low_s16(tmp[1]),
++                            vget_low_s16(tmp[2]),
++                            vget_low_s16(tmp[3]),
++                            vget_low_s16(tmp[4]),
++                            vget_low_s16(tmp[5]),
++                            vget_low_s16(tmp[6]),
++                            vget_low_s16(tmp[7]),
++                            &s0,
++                            &s1,
++                            &s2,
++                            &s3);
++
++    int16x8_t f[4];
++    load_filters_4(f, sy, gamma);
++
++    int32x4_t m0 = vmull_s16(vget_low_s16(s0), vget_low_s16(f[0]));
++    m0           = vmlal_s16(m0, vget_high_s16(s0), vget_high_s16(f[0]));
++    int32x4_t m1 = vmull_s16(vget_low_s16(s1), vget_low_s16(f[1]));
++    m1           = vmlal_s16(m1, vget_high_s16(s1), vget_high_s16(f[1]));
++    int32x4_t m2 = vmull_s16(vget_low_s16(s2), vget_low_s16(f[2]));
++    m2           = vmlal_s16(m2, vget_high_s16(s2), vget_high_s16(f[2]));
++    int32x4_t m3 = vmull_s16(vget_low_s16(s3), vget_low_s16(f[3]));
++    m3           = vmlal_s16(m3, vget_high_s16(s3), vget_high_s16(f[3]));
++
++    int32x4_t m0123[] = {m0, m1, m2, m3};
++    return horizontal_add_4d_s32x4(m0123);
++}
++
++static AOM_FORCE_INLINE int32x4x2_t vertical_filter_8x1_f8(const int16x8_t *tmp, int sy, int gamma) {
++    int16x8_t s0 = tmp[0];
++    int16x8_t s1 = tmp[1];
++    int16x8_t s2 = tmp[2];
++    int16x8_t s3 = tmp[3];
++    int16x8_t s4 = tmp[4];
++    int16x8_t s5 = tmp[5];
++    int16x8_t s6 = tmp[6];
++    int16x8_t s7 = tmp[7];
++    transpose_elems_inplace_s16_8x8(&s0, &s1, &s2, &s3, &s4, &s5, &s6, &s7);
++
++    int16x8_t f[8];
++    load_filters_8(f, sy, gamma);
++
++    int32x4_t m0 = vmull_s16(vget_low_s16(s0), vget_low_s16(f[0]));
++    m0           = vmlal_s16(m0, vget_high_s16(s0), vget_high_s16(f[0]));
++    int32x4_t m1 = vmull_s16(vget_low_s16(s1), vget_low_s16(f[1]));
++    m1           = vmlal_s16(m1, vget_high_s16(s1), vget_high_s16(f[1]));
++    int32x4_t m2 = vmull_s16(vget_low_s16(s2), vget_low_s16(f[2]));
++    m2           = vmlal_s16(m2, vget_high_s16(s2), vget_high_s16(f[2]));
++    int32x4_t m3 = vmull_s16(vget_low_s16(s3), vget_low_s16(f[3]));
++    m3           = vmlal_s16(m3, vget_high_s16(s3), vget_high_s16(f[3]));
++    int32x4_t m4 = vmull_s16(vget_low_s16(s4), vget_low_s16(f[4]));
++    m4           = vmlal_s16(m4, vget_high_s16(s4), vget_high_s16(f[4]));
++    int32x4_t m5 = vmull_s16(vget_low_s16(s5), vget_low_s16(f[5]));
++    m5           = vmlal_s16(m5, vget_high_s16(s5), vget_high_s16(f[5]));
++    int32x4_t m6 = vmull_s16(vget_low_s16(s6), vget_low_s16(f[6]));
++    m6           = vmlal_s16(m6, vget_high_s16(s6), vget_high_s16(f[6]));
++    int32x4_t m7 = vmull_s16(vget_low_s16(s7), vget_low_s16(f[7]));
++    m7           = vmlal_s16(m7, vget_high_s16(s7), vget_high_s16(f[7]));
++
++    int32x4_t m0123[] = {m0, m1, m2, m3};
++    int32x4_t m4567[] = {m4, m5, m6, m7};
++
++    int32x4x2_t ret;
++    ret.val[0] = horizontal_add_4d_s32x4(m0123);
++    ret.val[1] = horizontal_add_4d_s32x4(m4567);
++    return ret;
++}
++
++void svt_av1_highbd_warp_affine_neon(const int32_t *mat, const uint8_t *ref8b, const uint8_t *ref2b, int width,
++                                     int height, int stride8b, int stride2b, uint16_t *pred, int p_col, int p_row,
++                                     int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y,
++                                     int bd, ConvolveParams *conv_params, int16_t alpha, int16_t beta, int16_t gamma,
++                                     int16_t delta) {
++    uint16_t *ref = svt_aom_memalign(32, sizeof(uint16_t) * width * height);
++    svt_enc_msb_pack2d_neon((uint8_t *)ref8b, stride8b, (uint8_t *)ref2b, ref, stride2b, width, width, height);
++    highbd_warp_affine_common(mat,
++                              ref,
++                              width,
++                              height,
++                              width,
++                              pred,
++                              p_col,
++                              p_row,
++                              p_width,
++                              p_height,
++                              p_stride,
++                              subsampling_x,
++                              subsampling_y,
++                              bd,
++                              conv_params,
++                              alpha,
++                              beta,
++                              gamma,
++                              delta);
++    svt_aom_free(ref);
++}
+diff --git a/Source/Lib/ASM_NEON/highbd_warp_plane_neon.h b/Source/Lib/ASM_NEON/highbd_warp_plane_neon.h
+new file mode 100644
+index 00000000..99575524
+--- /dev/null
++++ b/Source/Lib/ASM_NEON/highbd_warp_plane_neon.h
+@@ -0,0 +1,499 @@
++/*
++ * Copyright (c) 2023, Alliance for Open Media. All rights reserved.
++ *
++ * This source code is subject to the terms of the BSD 2 Clause License and
++ * the Alliance for Open Media Patent License 1.0. If the BSD 2 Clause License
++ * was not distributed with this source code in the LICENSE file, you can
++ * obtain it at www.aomedia.org/license/software. If the Alliance for Open
++ * Media Patent License 1.0 was not distributed with this source code in the
++ * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
++ */
++#ifndef HIGHBD_WARP_PLANE_NEON_H_
++#define HIGHBD_WARP_PLANE_NEON_H_
++
++#include <arm_neon.h>
++#include <assert.h>
++#include <stdbool.h>
++
++#include "definitions.h"
++#include "mem_neon.h"
++#include "sum_neon.h"
++#include "warped_motion.h"
++
++static AOM_FORCE_INLINE int16x8_t highbd_horizontal_filter_4x1_f4(int16x8_t rv0, int16x8_t rv1, int16x8_t rv2,
++                                                                  int16x8_t rv3, int bd, int sx, int alpha);
++
++static AOM_FORCE_INLINE int16x8_t highbd_horizontal_filter_8x1_f8(int16x8_t rv0, int16x8_t rv1, int16x8_t rv2,
++                                                                  int16x8_t rv3, int16x8_t rv4, int16x8_t rv5,
++                                                                  int16x8_t rv6, int16x8_t rv7, int bd, int sx,
++                                                                  int alpha);
++
++static AOM_FORCE_INLINE int16x8_t highbd_horizontal_filter_4x1_f1(int16x8_t rv0, int16x8_t rv1, int16x8_t rv2,
++                                                                  int16x8_t rv3, int bd, int sx);
++
++static AOM_FORCE_INLINE int16x8_t highbd_horizontal_filter_8x1_f1(int16x8_t rv0, int16x8_t rv1, int16x8_t rv2,
++                                                                  int16x8_t rv3, int16x8_t rv4, int16x8_t rv5,
++                                                                  int16x8_t rv6, int16x8_t rv7, int bd, int sx);
++
++static AOM_FORCE_INLINE int32x4_t vertical_filter_4x1_f1(const int16x8_t *tmp, int sy);
++
++static AOM_FORCE_INLINE int32x4x2_t vertical_filter_8x1_f1(const int16x8_t *tmp, int sy);
++
++static AOM_FORCE_INLINE int32x4_t vertical_filter_4x1_f4(const int16x8_t *tmp, int sy, int gamma);
++
++static AOM_FORCE_INLINE int32x4x2_t vertical_filter_8x1_f8(const int16x8_t *tmp, int sy, int gamma);
++
++static AOM_FORCE_INLINE int16x8_t load_filters_1(int ofs) {
++    const int ofs0 = ROUND_POWER_OF_TWO(ofs, WARPEDDIFF_PREC_BITS);
++
++    const int16_t *base = (int16_t *)svt_aom_warped_filter + WARPEDPIXEL_PREC_SHIFTS * 8;
++    return vld1q_s16(base + ofs0 * 8);
++}
++
++static AOM_FORCE_INLINE void load_filters_4(int16x8_t out[], int ofs, int stride) {
++    const int ofs0 = ROUND_POWER_OF_TWO(ofs + stride * 0, WARPEDDIFF_PREC_BITS);
++    const int ofs1 = ROUND_POWER_OF_TWO(ofs + stride * 1, WARPEDDIFF_PREC_BITS);
++    const int ofs2 = ROUND_POWER_OF_TWO(ofs + stride * 2, WARPEDDIFF_PREC_BITS);
++    const int ofs3 = ROUND_POWER_OF_TWO(ofs + stride * 3, WARPEDDIFF_PREC_BITS);
++
++    const int16_t *base = (int16_t *)svt_aom_warped_filter + WARPEDPIXEL_PREC_SHIFTS * 8;
++    out[0]              = vld1q_s16(base + ofs0 * 8);
++    out[1]              = vld1q_s16(base + ofs1 * 8);
++    out[2]              = vld1q_s16(base + ofs2 * 8);
++    out[3]              = vld1q_s16(base + ofs3 * 8);
++}
++
++static AOM_FORCE_INLINE void load_filters_8(int16x8_t out[], int ofs, int stride) {
++    const int ofs0 = ROUND_POWER_OF_TWO(ofs + stride * 0, WARPEDDIFF_PREC_BITS);
++    const int ofs1 = ROUND_POWER_OF_TWO(ofs + stride * 1, WARPEDDIFF_PREC_BITS);
++    const int ofs2 = ROUND_POWER_OF_TWO(ofs + stride * 2, WARPEDDIFF_PREC_BITS);
++    const int ofs3 = ROUND_POWER_OF_TWO(ofs + stride * 3, WARPEDDIFF_PREC_BITS);
++    const int ofs4 = ROUND_POWER_OF_TWO(ofs + stride * 4, WARPEDDIFF_PREC_BITS);
++    const int ofs5 = ROUND_POWER_OF_TWO(ofs + stride * 5, WARPEDDIFF_PREC_BITS);
++    const int ofs6 = ROUND_POWER_OF_TWO(ofs + stride * 6, WARPEDDIFF_PREC_BITS);
++    const int ofs7 = ROUND_POWER_OF_TWO(ofs + stride * 7, WARPEDDIFF_PREC_BITS);
++
++    const int16_t *base = (int16_t *)svt_aom_warped_filter + WARPEDPIXEL_PREC_SHIFTS * 8;
++    out[0]              = vld1q_s16(base + ofs0 * 8);
++    out[1]              = vld1q_s16(base + ofs1 * 8);
++    out[2]              = vld1q_s16(base + ofs2 * 8);
++    out[3]              = vld1q_s16(base + ofs3 * 8);
++    out[4]              = vld1q_s16(base + ofs4 * 8);
++    out[5]              = vld1q_s16(base + ofs5 * 8);
++    out[6]              = vld1q_s16(base + ofs6 * 8);
++    out[7]              = vld1q_s16(base + ofs7 * 8);
++}
++
++static AOM_FORCE_INLINE uint16x4_t clip_pixel_highbd_vec(int32x4_t val, int bd) {
++    const int limit = (1 << bd) - 1;
++    return vqmovun_s32(vminq_s32(val, vdupq_n_s32(limit)));
++}
++
++static AOM_FORCE_INLINE uint16x8x2_t clamp_horizontal(uint16x8x2_t src_1, int out_of_boundary_left,
++                                                      int out_of_boundary_right, const uint16_t *ref, int iy,
++                                                      int stride, int width, const uint16x8_t indx0,
++                                                      const uint16x8_t indx1) {
++    if (out_of_boundary_left >= 0) {
++        uint16x8_t cmp_vec = vdupq_n_u16(out_of_boundary_left);
++        uint16x8_t vec_dup = vdupq_n_u16(ref[iy * stride]);
++        uint16x8_t mask0   = vcleq_u16(indx0, cmp_vec);
++        uint16x8_t mask1   = vcleq_u16(indx1, cmp_vec);
++        src_1.val[0]       = vbslq_u16(mask0, vec_dup, src_1.val[0]);
++        src_1.val[1]       = vbslq_u16(mask1, vec_dup, src_1.val[1]);
++    }
++    if (out_of_boundary_right >= 0) {
++        uint16x8_t cmp_vec = vdupq_n_u16(15 - out_of_boundary_right);
++        uint16x8_t vec_dup = vdupq_n_u16(ref[iy * stride + width - 1]);
++        uint16x8_t mask0   = vcgeq_u16(indx0, cmp_vec);
++        uint16x8_t mask1   = vcgeq_u16(indx1, cmp_vec);
++        src_1.val[0]       = vbslq_u16(mask0, vec_dup, src_1.val[0]);
++        src_1.val[1]       = vbslq_u16(mask1, vec_dup, src_1.val[1]);
++    }
++    return src_1;
++}
++
++static AOM_FORCE_INLINE void warp_affine_horizontal(const uint16_t *ref, int width, int height, int stride, int p_width,
++                                                    int16_t alpha, int16_t beta, int iy4, int sx4, int ix4,
++                                                    int16x8_t tmp[], int bd) {
++    if (ix4 <= -7) {
++        for (int k = 0; k < 15; ++k) {
++            int     iy      = clamp(iy4 + k - 7, 0, height - 1);
++            int32_t dup_val = (1 << (bd + FILTER_BITS - ROUND0_BITS - 1)) +
++                ref[iy * stride] * (1 << (FILTER_BITS - ROUND0_BITS));
++            tmp[k] = vdupq_n_s16(dup_val);
++        }
++        return;
++    } else if (ix4 >= width + 6) {
++        for (int k = 0; k < 15; ++k) {
++            int     iy      = clamp(iy4 + k - 7, 0, height - 1);
++            int32_t dup_val = (1 << (bd + FILTER_BITS - ROUND0_BITS - 1)) +
++                ref[iy * stride + (width - 1)] * (1 << (FILTER_BITS - ROUND0_BITS));
++            tmp[k] = vdupq_n_s16(dup_val);
++        }
++        return;
++    }
++
++    static const uint16_t kIotaArr[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
++    const uint16x8_t      indx0      = vld1q_u16(kIotaArr);
++    const uint16x8_t      indx1      = vld1q_u16(kIotaArr + 8);
++
++    const int out_of_boundary_left  = -(ix4 - 6);
++    const int out_of_boundary_right = (ix4 + 8) - width;
++
++#define APPLY_HORIZONTAL_SHIFT_4X1(fn, ...)                                                                                    \
++    do {                                                                                                                       \
++        if (out_of_boundary_left >= 0 || out_of_boundary_right >= 0) {                                                         \
++            for (int k = 0; k < 15; ++k) {                                                                                     \
++                const int       iy    = clamp(iy4 + k - 7, 0, height - 1);                                                     \
++                const uint16_t *idx   = ref + iy * stride + ix4 - 7;                                                           \
++                uint16x8x2_t    src_1 = vld1q_u16_x2(idx);                                                                     \
++                src_1                 = clamp_horizontal(                                                                      \
++                    src_1, out_of_boundary_left, out_of_boundary_right, ref, iy, stride, width, indx0, indx1); \
++                int16x8_t rv0 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 0);                              \
++                int16x8_t rv1 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 1);                              \
++                int16x8_t rv2 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 2);                              \
++                int16x8_t rv3 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 3);                              \
++                tmp[k] = (fn)(rv0, rv1, rv2, rv3, __VA_ARGS__);                                                                \
++            }                                                                                                                  \
++        } else {                                                                                                               \
++            for (int k = 0; k < 15; ++k) {                                                                                     \
++                const int       iy  = clamp(iy4 + k - 7, 0, height - 1);                                                       \
++                const uint16_t *src = ref + iy * stride + ix4;                                                                 \
++                int16x8_t       rv0 = vreinterpretq_s16_u16(vld1q_u16(src - 7));                                               \
++                int16x8_t       rv1 = vreinterpretq_s16_u16(vld1q_u16(src - 6));                                               \
++                int16x8_t       rv2 = vreinterpretq_s16_u16(vld1q_u16(src - 5));                                               \
++                int16x8_t       rv3 = vreinterpretq_s16_u16(vld1q_u16(src - 4));                                               \
++                tmp[k]              = (fn)(rv0, rv1, rv2, rv3, __VA_ARGS__);                                                   \
++            }                                                                                                                  \
++        }                                                                                                                      \
++    } while (0)
++
++#define APPLY_HORIZONTAL_SHIFT_8X1(fn, ...)                                                                                    \
++    do {                                                                                                                       \
++        if (out_of_boundary_left >= 0 || out_of_boundary_right >= 0) {                                                         \
++            for (int k = 0; k < 15; ++k) {                                                                                     \
++                const int       iy    = clamp(iy4 + k - 7, 0, height - 1);                                                     \
++                const uint16_t *idx   = ref + iy * stride + ix4 - 7;                                                           \
++                uint16x8x2_t    src_1 = vld1q_u16_x2(idx);                                                                     \
++                src_1                 = clamp_horizontal(                                                                      \
++                    src_1, out_of_boundary_left, out_of_boundary_right, ref, iy, stride, width, indx0, indx1); \
++                int16x8_t rv0 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 0);                              \
++                int16x8_t rv1 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 1);                              \
++                int16x8_t rv2 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 2);                              \
++                int16x8_t rv3 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 3);                              \
++                int16x8_t rv4 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 4);                              \
++                int16x8_t rv5 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 5);                              \
++                int16x8_t rv6 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 6);                              \
++                int16x8_t rv7 = vextq_s16(                                                                                     \
++                    vreinterpretq_s16_u16(src_1.val[0]), vreinterpretq_s16_u16(src_1.val[1]), 7);                              \
++                tmp[k] = (fn)(rv0, rv1, rv2, rv3, rv4, rv5, rv6, rv7, __VA_ARGS__);                                            \
++            }                                                                                                                  \
++        } else {                                                                                                               \
++            for (int k = 0; k < 15; ++k) {                                                                                     \
++                const int       iy  = clamp(iy4 + k - 7, 0, height - 1);                                                       \
++                const uint16_t *src = ref + iy * stride + ix4;                                                                 \
++                int16x8_t       rv0 = vreinterpretq_s16_u16(vld1q_u16(src - 7));                                               \
++                int16x8_t       rv1 = vreinterpretq_s16_u16(vld1q_u16(src - 6));                                               \
++                int16x8_t       rv2 = vreinterpretq_s16_u16(vld1q_u16(src - 5));                                               \
++                int16x8_t       rv3 = vreinterpretq_s16_u16(vld1q_u16(src - 4));                                               \
++                int16x8_t       rv4 = vreinterpretq_s16_u16(vld1q_u16(src - 3));                                               \
++                int16x8_t       rv5 = vreinterpretq_s16_u16(vld1q_u16(src - 2));                                               \
++                int16x8_t       rv6 = vreinterpretq_s16_u16(vld1q_u16(src - 1));                                               \
++                int16x8_t       rv7 = vreinterpretq_s16_u16(vld1q_u16(src - 0));                                               \
++                tmp[k]              = (fn)(rv0, rv1, rv2, rv3, rv4, rv5, rv6, rv7, __VA_ARGS__);                               \
++            }                                                                                                                  \
++        }                                                                                                                      \
++    } while (0)
++
++    if (p_width == 4) {
++        if (beta == 0) {
++            if (alpha == 0) {
++                APPLY_HORIZONTAL_SHIFT_4X1(highbd_horizontal_filter_4x1_f1, bd, sx4);
++            } else {
++                APPLY_HORIZONTAL_SHIFT_4X1(highbd_horizontal_filter_4x1_f4, bd, sx4, alpha);
++            }
++        } else {
++            if (alpha == 0) {
++                APPLY_HORIZONTAL_SHIFT_4X1(highbd_horizontal_filter_4x1_f1, bd, (sx4 + beta * (k - 3)));
++            } else {
++                APPLY_HORIZONTAL_SHIFT_4X1(highbd_horizontal_filter_4x1_f4, bd, (sx4 + beta * (k - 3)), alpha);
++            }
++        }
++    } else {
++        if (beta == 0) {
++            if (alpha == 0) {
++                APPLY_HORIZONTAL_SHIFT_8X1(highbd_horizontal_filter_8x1_f1, bd, sx4);
++            } else {
++                APPLY_HORIZONTAL_SHIFT_8X1(highbd_horizontal_filter_8x1_f8, bd, sx4, alpha);
++            }
++        } else {
++            if (alpha == 0) {
++                APPLY_HORIZONTAL_SHIFT_8X1(highbd_horizontal_filter_8x1_f1, bd, (sx4 + beta * (k - 3)));
++            } else {
++                APPLY_HORIZONTAL_SHIFT_8X1(highbd_horizontal_filter_8x1_f8, bd, (sx4 + beta * (k - 3)), alpha);
++            }
++        }
++    }
++
++#undef APPLY_HORIZONTAL_SHIFT_4X1
++#undef APPLY_HORIZONTAL_SHIFT_8X1
++}
++
++static AOM_FORCE_INLINE void highbd_vertical_filter_4x1_f4(uint16_t *pred, int p_stride, int bd, uint16_t *dst,
++                                                           int dst_stride, bool is_compound, bool do_average,
++                                                           bool use_dist_wtd_comp_avg, int fwd, int bwd, int16_t gamma,
++                                                           const int16x8_t *tmp, int i, int sy, int j) {
++    int32x4_t sum0 = gamma == 0 ? vertical_filter_4x1_f1(tmp, sy) : vertical_filter_4x1_f4(tmp, sy, gamma);
++
++    const int offset_bits_vert = bd + 2 * FILTER_BITS - ROUND0_BITS;
++
++    sum0 = vaddq_s32(sum0, vdupq_n_s32(1 << offset_bits_vert));
++
++    uint16_t *dst16 = &pred[i * p_stride + j];
++
++    if (!is_compound) {
++        sum0 = vrshrq_n_s32(sum0, 2 * FILTER_BITS - ROUND0_BITS);
++
++        const int res_sub_const = (1 << (bd - 1)) + (1 << bd);
++        sum0                    = vsubq_s32(sum0, vdupq_n_s32(res_sub_const));
++        uint16x4_t res0         = clip_pixel_highbd_vec(sum0, bd);
++        vst1_u16(dst16, res0);
++        return;
++    }
++
++    sum0 = vrshrq_n_s32(sum0, COMPOUND_ROUND1_BITS);
++
++    uint16_t *p = &dst[i * dst_stride + j];
++
++    if (!do_average) {
++        vst1_u16(p, vqmovun_s32(sum0));
++        return;
++    }
++
++    uint16x4_t p0     = vld1_u16(p);
++    int32x4_t  p_vec0 = vreinterpretq_s32_u32(vmovl_u16(p0));
++    if (use_dist_wtd_comp_avg) {
++        p_vec0 = vmulq_n_s32(p_vec0, fwd);
++        p_vec0 = vmlaq_n_s32(p_vec0, sum0, bwd);
++        p_vec0 = vshrq_n_s32(p_vec0, DIST_PRECISION_BITS);
++    } else {
++        p_vec0 = vhaddq_s32(p_vec0, sum0);
++    }
++
++    const int offset_bits   = bd + 2 * FILTER_BITS - ROUND0_BITS;
++    const int res_sub_const = (1 << (offset_bits - COMPOUND_ROUND1_BITS)) +
++        (1 << (offset_bits - COMPOUND_ROUND1_BITS - 1));
++
++    p_vec0          = vsubq_s32(p_vec0, vdupq_n_s32(res_sub_const));
++    p_vec0          = vrshrq_n_s32(p_vec0, 2 * FILTER_BITS - ROUND0_BITS - COMPOUND_ROUND1_BITS);
++    uint16x4_t res0 = clip_pixel_highbd_vec(p_vec0, bd);
++    vst1_u16(dst16, res0);
++}
++
++static AOM_FORCE_INLINE void highbd_vertical_filter_8x1_f8(uint16_t *pred, int p_stride, int bd, uint16_t *dst,
++                                                           int dst_stride, bool is_compound, bool do_average,
++                                                           bool use_dist_wtd_comp_avg, int fwd, int bwd, int16_t gamma,
++                                                           const int16x8_t *tmp, int i, int sy, int j) {
++    int32x4x2_t sums = gamma == 0 ? vertical_filter_8x1_f1(tmp, sy) : vertical_filter_8x1_f8(tmp, sy, gamma);
++    int32x4_t   sum0 = sums.val[0];
++    int32x4_t   sum1 = sums.val[1];
++
++    const int offset_bits_vert = bd + 2 * FILTER_BITS - ROUND0_BITS;
++
++    sum0 = vaddq_s32(sum0, vdupq_n_s32(1 << offset_bits_vert));
++    sum1 = vaddq_s32(sum1, vdupq_n_s32(1 << offset_bits_vert));
++
++    uint16_t *dst16 = &pred[i * p_stride + j];
++
++    if (!is_compound) {
++        sum0 = vrshrq_n_s32(sum0, 2 * FILTER_BITS - ROUND0_BITS);
++        sum1 = vrshrq_n_s32(sum1, 2 * FILTER_BITS - ROUND0_BITS);
++
++        const int res_sub_const = (1 << (bd - 1)) + (1 << bd);
++        sum0                    = vsubq_s32(sum0, vdupq_n_s32(res_sub_const));
++        sum1                    = vsubq_s32(sum1, vdupq_n_s32(res_sub_const));
++        uint16x4_t res0         = clip_pixel_highbd_vec(sum0, bd);
++        uint16x4_t res1         = clip_pixel_highbd_vec(sum1, bd);
++        vst1_u16(dst16, res0);
++        vst1_u16(dst16 + 4, res1);
++        return;
++    }
++
++    sum0 = vrshrq_n_s32(sum0, COMPOUND_ROUND1_BITS);
++    sum1 = vrshrq_n_s32(sum1, COMPOUND_ROUND1_BITS);
++
++    uint16_t *p = &dst[i * dst_stride + j];
++
++    if (!do_average) {
++        vst1_u16(p, vqmovun_s32(sum0));
++        vst1_u16(p + 4, vqmovun_s32(sum1));
++        return;
++    }
++
++    uint16x8_t p0     = vld1q_u16(p);
++    int32x4_t  p_vec0 = vreinterpretq_s32_u32(vmovl_u16(vget_low_u16(p0)));
++    int32x4_t  p_vec1 = vreinterpretq_s32_u32(vmovl_u16(vget_high_u16(p0)));
++    if (use_dist_wtd_comp_avg) {
++        p_vec0 = vmulq_n_s32(p_vec0, fwd);
++        p_vec1 = vmulq_n_s32(p_vec1, fwd);
++        p_vec0 = vmlaq_n_s32(p_vec0, sum0, bwd);
++        p_vec1 = vmlaq_n_s32(p_vec1, sum1, bwd);
++        p_vec0 = vshrq_n_s32(p_vec0, DIST_PRECISION_BITS);
++        p_vec1 = vshrq_n_s32(p_vec1, DIST_PRECISION_BITS);
++    } else {
++        p_vec0 = vhaddq_s32(p_vec0, sum0);
++        p_vec1 = vhaddq_s32(p_vec1, sum1);
++    }
++
++    const int offset_bits   = bd + 2 * FILTER_BITS - ROUND0_BITS;
++    const int res_sub_const = (1 << (offset_bits - COMPOUND_ROUND1_BITS)) +
++        (1 << (offset_bits - COMPOUND_ROUND1_BITS - 1));
++
++    p_vec0 = vsubq_s32(p_vec0, vdupq_n_s32(res_sub_const));
++    p_vec1 = vsubq_s32(p_vec1, vdupq_n_s32(res_sub_const));
++
++    p_vec0          = vrshrq_n_s32(p_vec0, 2 * FILTER_BITS - ROUND0_BITS - COMPOUND_ROUND1_BITS);
++    p_vec1          = vrshrq_n_s32(p_vec1, 2 * FILTER_BITS - ROUND0_BITS - COMPOUND_ROUND1_BITS);
++    uint16x4_t res0 = clip_pixel_highbd_vec(p_vec0, bd);
++    uint16x4_t res1 = clip_pixel_highbd_vec(p_vec1, bd);
++    vst1_u16(dst16, res0);
++    vst1_u16(dst16 + 4, res1);
++}
++
++static AOM_FORCE_INLINE void warp_affine_vertical(uint16_t *pred, int p_width, int p_height, int p_stride, int bd,
++                                                  uint16_t *dst, int dst_stride, bool is_compound, bool do_average,
++                                                  bool use_dist_wtd_comp_avg, int fwd, int bwd, int16_t gamma,
++                                                  int16_t delta, const int16x8_t *tmp, int i, int sy4, int j) {
++    int limit_height = p_height > 4 ? 8 : 4;
++
++    if (p_width > 4) {
++        // p_width == 8
++        for (int k = 0; k < limit_height; ++k) {
++            int sy = sy4 + delta * k;
++            highbd_vertical_filter_8x1_f8(pred,
++                                          p_stride,
++                                          bd,
++                                          dst,
++                                          dst_stride,
++                                          is_compound,
++                                          do_average,
++                                          use_dist_wtd_comp_avg,
++                                          fwd,
++                                          bwd,
++                                          gamma,
++                                          tmp + k,
++                                          i + k,
++                                          sy,
++                                          j);
++        }
++    } else {
++        // p_width == 4
++        for (int k = 0; k < limit_height; ++k) {
++            int sy = sy4 + delta * k;
++            highbd_vertical_filter_4x1_f4(pred,
++                                          p_stride,
++                                          bd,
++                                          dst,
++                                          dst_stride,
++                                          is_compound,
++                                          do_average,
++                                          use_dist_wtd_comp_avg,
++                                          fwd,
++                                          bwd,
++                                          gamma,
++                                          tmp + k,
++                                          i + k,
++                                          sy,
++                                          j);
++        }
++    }
++}
++
++static AOM_FORCE_INLINE void highbd_warp_affine_common(const int32_t *mat, const uint16_t *ref, int width, int height,
++                                                       int stride, uint16_t *pred, int p_col, int p_row, int p_width,
++                                                       int p_height, int p_stride, int subsampling_x, int subsampling_y,
++                                                       int bd, ConvolveParams *conv_params, int16_t alpha, int16_t beta,
++                                                       int16_t gamma, int16_t delta) {
++    uint16_t *const dst                   = conv_params->dst;
++    const int       dst_stride            = conv_params->dst_stride;
++    const bool      is_compound           = conv_params->is_compound;
++    const bool      do_average            = conv_params->do_average;
++    const bool      use_dist_wtd_comp_avg = conv_params->use_dist_wtd_comp_avg;
++    const int       fwd                   = conv_params->fwd_offset;
++    const int       bwd                   = conv_params->bck_offset;
++
++    assert(IMPLIES(is_compound, dst != NULL));
++
++    for (int i = 0; i < p_height; i += 8) {
++        for (int j = 0; j < p_width; j += 8) {
++            // Calculate the center of this 8x8 block,
++            // project to luma coordinates (if in a subsampled chroma plane),
++            // apply the affine transformation,
++            // then convert back to the original coordinates (if necessary)
++            const int32_t src_x = (j + 4 + p_col) << subsampling_x;
++            const int32_t src_y = (i + 4 + p_row) << subsampling_y;
++            const int64_t dst_x = (int64_t)mat[2] * src_x + (int64_t)mat[3] * src_y + (int64_t)mat[0];
++            const int64_t dst_y = (int64_t)mat[4] * src_x + (int64_t)mat[5] * src_y + (int64_t)mat[1];
++            const int64_t x4    = dst_x >> subsampling_x;
++            const int64_t y4    = dst_y >> subsampling_y;
++
++            const int32_t ix4 = (int32_t)(x4 >> WARPEDMODEL_PREC_BITS);
++            int32_t       sx4 = x4 & ((1 << WARPEDMODEL_PREC_BITS) - 1);
++            const int32_t iy4 = (int32_t)(y4 >> WARPEDMODEL_PREC_BITS);
++            int32_t       sy4 = y4 & ((1 << WARPEDMODEL_PREC_BITS) - 1);
++
++            sx4 += alpha * (-4) + beta * (-4);
++            sy4 += gamma * (-4) + delta * (-4);
++
++            sx4 &= ~((1 << WARP_PARAM_REDUCE_BITS) - 1);
++            sy4 &= ~((1 << WARP_PARAM_REDUCE_BITS) - 1);
++
++            // Each horizontal filter result is formed by the sum of up to eight
++            // multiplications by filter values and then a shift. Although both the
++            // inputs and filters are loaded as int16, the input data is at most bd
++            // bits and the filters are at most 8 bits each. Additionally since we
++            // know all possible filter values we know that the sum of absolute
++            // filter values will fit in at most 9 bits. With this in mind we can
++            // conclude that the sum of each filter application will fit in bd + 9
++            // bits. The shift following the summation is ROUND0_BITS (which is 3),
++            // which gives us a final storage of:
++            // bd ==  8: ( 8 + 9) - 3 => 14 bits
++            // bd == 10: (10 + 9) - 3 => 16 bits
++            // So it is safe to use int16x8_t as the intermediate storage type here.
++            int16x8_t tmp[15];
++
++            warp_affine_horizontal(ref, width, height, stride, p_width, alpha, beta, iy4, sx4, ix4, tmp, bd);
++            warp_affine_vertical(pred,
++                                 p_width,
++                                 p_height,
++                                 p_stride,
++                                 bd,
++                                 dst,
++                                 dst_stride,
++                                 is_compound,
++                                 do_average,
++                                 use_dist_wtd_comp_avg,
++                                 fwd,
++                                 bwd,
++                                 gamma,
++                                 delta,
++                                 tmp,
++                                 i,
++                                 sy4,
++                                 j);
++        }
++    }
++}
++
++#endif // HIGHBD_WARP_PLANE_NEON_H_
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index a92daaa0..3a71a74c 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1330,7 +1330,7 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON(svt_cdef_filter_block, svt_cdef_filter_block_c, svt_cdef_filter_block_neon);
+ 
+     SET_NEON(svt_aom_copy_rect8_8bit_to_16bit, svt_aom_copy_rect8_8bit_to_16bit_c, svt_aom_copy_rect8_8bit_to_16bit_neon);
+-    SET_ONLY_C(svt_av1_highbd_warp_affine, svt_av1_highbd_warp_affine_c);
++    SET_NEON(svt_av1_highbd_warp_affine, svt_av1_highbd_warp_affine_c, svt_av1_highbd_warp_affine_neon);
+     SET_NEON(svt_av1_warp_affine, svt_av1_warp_affine_c, svt_av1_warp_affine_neon);
+ 
+     SET_ONLY_C(svt_aom_highbd_lpf_horizontal_4, svt_aom_highbd_lpf_horizontal_4_c);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index a3ff66a1..96cc3809 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1139,6 +1139,8 @@ extern "C" {
+ 
+     void svt_av1_warp_affine_neon(const int32_t *mat, const uint8_t *ref, int width, int height, int stride, uint8_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, ConvolveParams *conv_params, int16_t alpha, int16_t beta, int16_t gamma, int16_t delta);
+ 
++    void svt_av1_highbd_warp_affine_neon(const int32_t *mat, const uint8_t *ref8b, const uint8_t *ref2b,  int width, int height, int stride8b, int stride2b, uint16_t *pred, int p_col, int p_row, int p_width, int p_height, int p_stride, int subsampling_x, int subsampling_y, int bd, ConvolveParams *conv_params, int16_t alpha, int16_t beta, int16_t gamma, int16_t delta);
++
+     uint64_t svt_spatial_full_distortion_kernel_neon(uint8_t *input, uint32_t input_offset, uint32_t input_stride, uint8_t *recon, int32_t recon_offset, uint32_t recon_stride, uint32_t area_width, uint32_t area_height);
+ 
+     void svt_av1_wiener_convolve_add_src_neon(const uint8_t *const src, const ptrdiff_t src_stride, uint8_t *const dst, const ptrdiff_t dst_stride, const int16_t *const filter_x, const int16_t *const filter_y, const int32_t w, const int32_t h, const ConvolveParams *const conv_params);
+diff --git a/test/warp_filter_test.cc b/test/warp_filter_test.cc
+index 504fcae6..386b24a6 100644
+--- a/test/warp_filter_test.cc
++++ b/test/warp_filter_test.cc
+@@ -61,6 +61,10 @@ INSTANTIATE_TEST_SUITE_P(SSE4_1, AV1HighbdWarpFilterTest,
+ INSTANTIATE_TEST_SUITE_P(
+     NEON, AV1WarpFilterTest,
+     libaom_test::AV1WarpFilter::BuildParams(svt_av1_warp_affine_neon));
++
++INSTANTIATE_TEST_SUITE_P(NEON, AV1HighbdWarpFilterTest,
++                         libaom_test::AV1HighbdWarpFilter::BuildParams(
++                             svt_av1_highbd_warp_affine_neon));
+ #endif  // ARCH_AARCH64
+ 
+ }  // namespace
+-- 
+2.36.0.windows.1
+

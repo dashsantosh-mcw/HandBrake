@@ -1,0 +1,144 @@
+From 3dba5fb42b30c228e75d3aa7b31c35770c082f78 Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Sat, 12 Oct 2024 22:04:34 +0100
+Subject: [PATCH 13/56] Add SVE implementation of
+ svt_av1_wedge_sse_from_residuals
+
+Port the libaom SVE implemenatation of svt_av1_wedge_sse_from_residuals
+and add the corresponding unit tests.
+---
+ Source/Lib/ASM_SVE/CMakeLists.txt    |  3 +-
+ Source/Lib/ASM_SVE/wedge_utils_sve.c | 62 ++++++++++++++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c   |  2 +-
+ Source/Lib/Codec/common_dsp_rtcd.h   |  1 +
+ test/WedgeUtilTest.cc                |  6 +++
+ 5 files changed, 72 insertions(+), 2 deletions(-)
+ create mode 100644 Source/Lib/ASM_SVE/wedge_utils_sve.c
+
+diff --git a/Source/Lib/ASM_SVE/CMakeLists.txt b/Source/Lib/ASM_SVE/CMakeLists.txt
+index 06f9d913..58eae80e 100644
+--- a/Source/Lib/ASM_SVE/CMakeLists.txt
++++ b/Source/Lib/ASM_SVE/CMakeLists.txt
+@@ -25,7 +25,8 @@ target_sources(
+   PUBLIC highbd_variance_sve.c
+   PUBLIC highbd_warp_plane_sve.c
+   PUBLIC pickrst_sve.c
+-  PUBLIC warp_plane_sve.c)
++  PUBLIC warp_plane_sve.c
++  PUBLIC wedge_utils_sve.c)
+ 
+ target_include_directories(
+   ASM_SVE
+diff --git a/Source/Lib/ASM_SVE/wedge_utils_sve.c b/Source/Lib/ASM_SVE/wedge_utils_sve.c
+new file mode 100644
+index 00000000..4655db8f
+--- /dev/null
++++ b/Source/Lib/ASM_SVE/wedge_utils_sve.c
+@@ -0,0 +1,62 @@
++/*
++ * Copyright (c) 2024, Alliance for Open Media. All rights reserved
++ *
++ * This source code is subject to the terms of the BSD 2 Clause License and
++ * the Alliance for Open Media Patent License 1.0. If the BSD 2 Clause License
++ * was not distributed with this source code in the LICENSE file, you can
++ * obtain it at www.aomedia.org/license/software. If the Alliance for Open
++ * Media Patent License 1.0 was not distributed with this source code in the
++ * PATENTS file, you can obtain it at www.aomedia.org/license/patent.
++ */
++
++#include <arm_neon.h>
++#include <arm_sve.h>
++#include <assert.h>
++
++#include "aom_dsp_rtcd.h"
++#include "definitions.h"
++#include "neon_sve_bridge.h"
++
++uint64_t svt_av1_wedge_sse_from_residuals_sve(const int16_t *r1, const int16_t *d, const uint8_t *m, int N) {
++    assert(N % 64 == 0);
++
++    // Predicate pattern with first 8 elements true.
++    const svbool_t pattern = svptrue_pat_b16(SV_VL8);
++    int64x2_t      sse[2]  = {vdupq_n_s64(0), vdupq_n_s64(0)};
++
++    int i = 0;
++    do {
++        int32x4_t sum[4];
++        int16x8_t sum_s16[2];
++
++        const int16x8_t r1_l = vld1q_s16(r1 + i);
++        const int16x8_t r1_h = vld1q_s16(r1 + i + 8);
++        const int16x8_t d_l  = vld1q_s16(d + i);
++        const int16x8_t d_h  = vld1q_s16(d + i + 8);
++
++        // Use a zero-extending load to widen the vector elements.
++        const int16x8_t m_l = svget_neonq_s16(svld1ub_s16(pattern, m + i));
++        const int16x8_t m_h = svget_neonq_s16(svld1ub_s16(pattern, m + i + 8));
++
++        sum[0] = vshll_n_s16(vget_low_s16(r1_l), WEDGE_WEIGHT_BITS);
++        sum[1] = vshll_n_s16(vget_high_s16(r1_l), WEDGE_WEIGHT_BITS);
++        sum[2] = vshll_n_s16(vget_low_s16(r1_h), WEDGE_WEIGHT_BITS);
++        sum[3] = vshll_n_s16(vget_high_s16(r1_h), WEDGE_WEIGHT_BITS);
++
++        sum[0] = vmlal_s16(sum[0], vget_low_s16(m_l), vget_low_s16(d_l));
++        sum[1] = vmlal_s16(sum[1], vget_high_s16(m_l), vget_high_s16(d_l));
++        sum[2] = vmlal_s16(sum[2], vget_low_s16(m_h), vget_low_s16(d_h));
++        sum[3] = vmlal_s16(sum[3], vget_high_s16(m_h), vget_high_s16(d_h));
++
++        sum_s16[0] = vcombine_s16(vqmovn_s32(sum[0]), vqmovn_s32(sum[1]));
++        sum_s16[1] = vcombine_s16(vqmovn_s32(sum[2]), vqmovn_s32(sum[3]));
++
++        sse[0] = svt_sdotq_s16(sse[0], sum_s16[0], sum_s16[0]);
++        sse[1] = svt_sdotq_s16(sse[1], sum_s16[1], sum_s16[1]);
++
++        i += 16;
++    } while (i < N);
++
++    const uint64_t csse = (uint64_t)vaddvq_s64(vaddq_s64(sse[0], sse[1]));
++    return ROUND_POWER_OF_TWO(csse, 2 * WEDGE_WEIGHT_BITS);
++}
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index db454b8d..a0727961 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1079,7 +1079,7 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_NEON_NEON_DOTPROD_NEON_I8MM(svt_aom_convolve8_vert, svt_aom_convolve8_vert_c, svt_aom_convolve8_vert_neon, svt_aom_convolve8_vert_neon_dotprod, svt_aom_convolve8_vert_neon_i8mm);
+     SET_ONLY_C(svt_av1_build_compound_diffwtd_mask, svt_av1_build_compound_diffwtd_mask_c);
+     SET_ONLY_C(svt_av1_build_compound_diffwtd_mask_highbd, svt_av1_build_compound_diffwtd_mask_highbd_c);
+-    SET_NEON(svt_av1_wedge_sse_from_residuals, svt_av1_wedge_sse_from_residuals_c, svt_av1_wedge_sse_from_residuals_neon);
++    SET_NEON_SVE(svt_av1_wedge_sse_from_residuals, svt_av1_wedge_sse_from_residuals_c, svt_av1_wedge_sse_from_residuals_neon, svt_av1_wedge_sse_from_residuals_sve);
+     SET_NEON(svt_aom_subtract_block, svt_aom_subtract_block_c, svt_aom_subtract_block_neon);
+     SET_ONLY_C(svt_aom_highbd_subtract_block, svt_aom_highbd_subtract_block_c);
+     SET_ONLY_C(svt_aom_highbd_smooth_v_predictor_4x4, svt_aom_highbd_smooth_v_predictor_4x4_c);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index 3b4113e8..86beb125 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1168,6 +1168,7 @@ extern "C" {
+     void svt_av1_dr_prediction_z3_neon(uint8_t *dst, ptrdiff_t stride, int32_t bw, int32_t bh, const uint8_t *above, const uint8_t *left, int32_t upsample_left, int32_t dx, int32_t dy);
+ 
+     uint64_t svt_av1_wedge_sse_from_residuals_neon(const int16_t *r1, const int16_t *d, const uint8_t *m, int N);
++    uint64_t svt_av1_wedge_sse_from_residuals_sve(const int16_t *r1, const int16_t *d, const uint8_t *m, int N);
+ 
+     void svt_av1_selfguided_restoration_neon(const uint8_t *dat8, int32_t width, int32_t height, int32_t stride, int32_t *flt0, int32_t *flt1, int32_t flt_stride, int32_t sgr_params_idx, int32_t bit_depth, int32_t highbd);
+     void svt_aom_apply_selfguided_restoration_neon(const uint8_t *dat, int32_t width, int32_t height, int32_t stride, int32_t eps, const int32_t *xqd, uint8_t *dst, int32_t dst_stride, int32_t *tmpbuf, int32_t bit_depth, int32_t highbd);
+diff --git a/test/WedgeUtilTest.cc b/test/WedgeUtilTest.cc
+index 7e91b8b6..372d49d1 100644
+--- a/test/WedgeUtilTest.cc
++++ b/test/WedgeUtilTest.cc
+@@ -367,6 +367,12 @@ INSTANTIATE_TEST_SUITE_P(
+ INSTANTIATE_TEST_SUITE_P(
+     NEON, WedgeSseFromResidualsTest,
+     ::testing::Values(svt_av1_wedge_sse_from_residuals_neon));
++
++#if HAVE_SVE
++INSTANTIATE_TEST_SUITE_P(
++    SVE, WedgeSseFromResidualsTest,
++    ::testing::Values(svt_av1_wedge_sse_from_residuals_sve));
++#endif
+ #endif  // ARCH_AARCH64
+ 
+ typedef uint64_t (*AomSumSquaresI16Func)(const int16_t *, uint32_t);
+-- 
+2.36.0.windows.1
+

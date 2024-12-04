@@ -1,0 +1,303 @@
+From 65134b39d9a1ba39dff9c600680083d6bbce0e4e Mon Sep 17 00:00:00 2001
+From: Salome Thirot <salome.thirot@arm.com>
+Date: Wed, 9 Oct 2024 14:08:47 +0100
+Subject: [PATCH 10/56] Add Neon implementation of svt_av1_filter_intra_edge
+
+Port the libaom Neon implementation of svt_av1_filter_intra_edge and add
+the corresponding tests.
+---
+ Source/Lib/ASM_NEON/intra_prediction_neon.c | 145 ++++++++++++++++++++
+ Source/Lib/Codec/common_dsp_rtcd.c          |   2 +-
+ Source/Lib/Codec/common_dsp_rtcd.h          |   2 +
+ test/CMakeLists.txt                         |   2 +-
+ test/intrapred_edge_filter_test.cc          |  25 +++-
+ 5 files changed, 168 insertions(+), 8 deletions(-)
+
+diff --git a/Source/Lib/ASM_NEON/intra_prediction_neon.c b/Source/Lib/ASM_NEON/intra_prediction_neon.c
+index 2135b09b..c5eb4289 100644
+--- a/Source/Lib/ASM_NEON/intra_prediction_neon.c
++++ b/Source/Lib/ASM_NEON/intra_prediction_neon.c
+@@ -3214,3 +3214,148 @@ PAETH_NXM_WIDE(16, 4)
+ PAETH_NXM_WIDE(16, 64)
+ PAETH_NXM_WIDE(32, 8)
+ PAETH_NXM_WIDE(64, 16)
++
++void svt_av1_filter_intra_edge_neon(uint8_t *p, int sz, int strength) {
++    if (!strength)
++        return;
++    assert(sz >= 0 && sz <= 129);
++
++    uint8_t edge[160]; // Max value of sz + enough padding for vector accesses.
++    memcpy(edge + 1, p, sz * sizeof(*p));
++
++    // Populate extra space appropriately.
++    edge[0]      = edge[1];
++    edge[sz + 1] = edge[sz];
++    edge[sz + 2] = edge[sz];
++
++    // Don't overwrite first pixel.
++    uint8_t *dst = p + 1;
++    sz--;
++
++    if (strength == 1) { // Filter: {4, 8, 4}.
++        const uint8_t *src = edge + 1;
++
++        while (sz >= 8) {
++            uint8x8_t s0 = vld1_u8(src);
++            uint8x8_t s1 = vld1_u8(src + 1);
++            uint8x8_t s2 = vld1_u8(src + 2);
++
++            // Make use of the identity:
++            // (4*a + 8*b + 4*c) >> 4 == (a + (b << 1) + c) >> 2
++            uint16x8_t t0  = vaddl_u8(s0, s2);
++            uint16x8_t t1  = vaddl_u8(s1, s1);
++            uint16x8_t sum = vaddq_u16(t0, t1);
++            uint8x8_t  res = vrshrn_n_u16(sum, 2);
++
++            vst1_u8(dst, res);
++
++            src += 8;
++            dst += 8;
++            sz -= 8;
++        }
++
++        if (sz > 0) { // Handle sz < 8 to avoid modifying out-of-bounds values.
++            uint8x8_t s0 = vld1_u8(src);
++            uint8x8_t s1 = vld1_u8(src + 1);
++            uint8x8_t s2 = vld1_u8(src + 2);
++
++            uint16x8_t t0  = vaddl_u8(s0, s2);
++            uint16x8_t t1  = vaddl_u8(s1, s1);
++            uint16x8_t sum = vaddq_u16(t0, t1);
++            uint8x8_t  res = vrshrn_n_u16(sum, 2);
++
++            // Mask off out-of-bounds indices.
++            uint8x8_t current_dst = vld1_u8(dst);
++            uint8x8_t mask        = vcgt_u8(vdup_n_u8(sz), vcreate_u8(0x0706050403020100));
++            res                   = vbsl_u8(mask, res, current_dst);
++
++            vst1_u8(dst, res);
++        }
++    } else if (strength == 2) { // Filter: {5, 6, 5}.
++        const uint8_t *src = edge + 1;
++
++        const uint8x8x3_t filter = {{vdup_n_u8(5), vdup_n_u8(6), vdup_n_u8(5)}};
++
++        while (sz >= 8) {
++            uint8x8_t s0 = vld1_u8(src);
++            uint8x8_t s1 = vld1_u8(src + 1);
++            uint8x8_t s2 = vld1_u8(src + 2);
++
++            uint16x8_t accum = vmull_u8(s0, filter.val[0]);
++            accum            = vmlal_u8(accum, s1, filter.val[1]);
++            accum            = vmlal_u8(accum, s2, filter.val[2]);
++            uint8x8_t res    = vrshrn_n_u16(accum, 4);
++
++            vst1_u8(dst, res);
++
++            src += 8;
++            dst += 8;
++            sz -= 8;
++        }
++
++        if (sz > 0) { // Handle sz < 8 to avoid modifying out-of-bounds values.
++            uint8x8_t s0 = vld1_u8(src);
++            uint8x8_t s1 = vld1_u8(src + 1);
++            uint8x8_t s2 = vld1_u8(src + 2);
++
++            uint16x8_t accum = vmull_u8(s0, filter.val[0]);
++            accum            = vmlal_u8(accum, s1, filter.val[1]);
++            accum            = vmlal_u8(accum, s2, filter.val[2]);
++            uint8x8_t res    = vrshrn_n_u16(accum, 4);
++
++            // Mask off out-of-bounds indices.
++            uint8x8_t current_dst = vld1_u8(dst);
++            uint8x8_t mask        = vcgt_u8(vdup_n_u8(sz), vcreate_u8(0x0706050403020100));
++            res                   = vbsl_u8(mask, res, current_dst);
++
++            vst1_u8(dst, res);
++        }
++    } else { // Filter {2, 4, 4, 4, 2}.
++        const uint8_t *src = edge;
++
++        while (sz >= 8) {
++            uint8x8_t s0 = vld1_u8(src);
++            uint8x8_t s1 = vld1_u8(src + 1);
++            uint8x8_t s2 = vld1_u8(src + 2);
++            uint8x8_t s3 = vld1_u8(src + 3);
++            uint8x8_t s4 = vld1_u8(src + 4);
++
++            // Make use of the identity:
++            // (2*a + 4*b + 4*c + 4*d + 2*e) >> 4 == (a + ((b + c + d) << 1) + e) >> 3
++            uint16x8_t t0  = vaddl_u8(s0, s4);
++            uint16x8_t t1  = vaddl_u8(s1, s2);
++            t1             = vaddw_u8(t1, s3);
++            t1             = vaddq_u16(t1, t1);
++            uint16x8_t sum = vaddq_u16(t0, t1);
++            uint8x8_t  res = vrshrn_n_u16(sum, 3);
++
++            vst1_u8(dst, res);
++
++            src += 8;
++            dst += 8;
++            sz -= 8;
++        }
++
++        if (sz > 0) { // Handle sz < 8 to avoid modifying out-of-bounds values.
++            uint8x8_t s0 = vld1_u8(src);
++            uint8x8_t s1 = vld1_u8(src + 1);
++            uint8x8_t s2 = vld1_u8(src + 2);
++            uint8x8_t s3 = vld1_u8(src + 3);
++            uint8x8_t s4 = vld1_u8(src + 4);
++
++            uint16x8_t t0  = vaddl_u8(s0, s4);
++            uint16x8_t t1  = vaddl_u8(s1, s2);
++            t1             = vaddw_u8(t1, s3);
++            t1             = vaddq_u16(t1, t1);
++            uint16x8_t sum = vaddq_u16(t0, t1);
++            uint8x8_t  res = vrshrn_n_u16(sum, 3);
++
++            // Mask off out-of-bounds indices.
++            uint8x8_t current_dst = vld1_u8(dst);
++            uint8x8_t mask        = vcgt_u8(vdup_n_u8(sz), vcreate_u8(0x0706050403020100));
++            res                   = vbsl_u8(mask, res, current_dst);
++
++            vst1_u8(dst, res);
++        }
++    }
++}
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.c b/Source/Lib/Codec/common_dsp_rtcd.c
+index 5e2d84db..c01bf38d 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.c
++++ b/Source/Lib/Codec/common_dsp_rtcd.c
+@@ -1010,7 +1010,7 @@ void svt_aom_setup_common_rtcd_internal(EbCpuFlags flags) {
+     SET_ONLY_C(svt_cfl_predict_hbd, svt_cfl_predict_hbd_c);
+     SET_NEON(svt_av1_filter_intra_predictor, svt_av1_filter_intra_predictor_c, svt_av1_filter_intra_predictor_neon);
+     SET_ONLY_C(svt_av1_filter_intra_edge_high, svt_av1_filter_intra_edge_high_c);
+-    SET_ONLY_C(svt_av1_filter_intra_edge, svt_av1_filter_intra_edge_c);
++    SET_NEON(svt_av1_filter_intra_edge, svt_av1_filter_intra_edge_c, svt_av1_filter_intra_edge_neon);
+     SET_ONLY_C(svt_av1_upsample_intra_edge, svt_av1_upsample_intra_edge_c);
+     SET_ONLY_C(svt_av1_build_compound_diffwtd_mask_d16, svt_av1_build_compound_diffwtd_mask_d16_c);
+     SET_NEON(svt_av1_highbd_wiener_convolve_add_src, svt_av1_highbd_wiener_convolve_add_src_c, svt_av1_highbd_wiener_convolve_add_src_neon);
+diff --git a/Source/Lib/Codec/common_dsp_rtcd.h b/Source/Lib/Codec/common_dsp_rtcd.h
+index cac18b77..8524c539 100644
+--- a/Source/Lib/Codec/common_dsp_rtcd.h
++++ b/Source/Lib/Codec/common_dsp_rtcd.h
+@@ -1160,6 +1160,8 @@ extern "C" {
+ 
+     void svt_av1_selfguided_restoration_neon(const uint8_t *dat8, int32_t width, int32_t height, int32_t stride, int32_t *flt0, int32_t *flt1, int32_t flt_stride, int32_t sgr_params_idx, int32_t bit_depth, int32_t highbd);
+ 
++    void svt_av1_filter_intra_edge_neon(uint8_t *p, int32_t sz, int32_t strength);
++
+     void svt_av1_dr_prediction_z1_neon(uint8_t *dst, ptrdiff_t stride, int32_t bw, int32_t bh, const uint8_t *above, const uint8_t *left,int32_t upsample_above, int32_t dx, int32_t dy);
+     void svt_av1_dr_prediction_z2_neon(uint8_t *dst, ptrdiff_t stride, int32_t bw, int32_t bh, const uint8_t *above, const uint8_t *left, int32_t upsample_above, int32_t upsample_left, int32_t dx,int32_t dy);
+     void svt_av1_dr_prediction_z3_neon(uint8_t *dst, ptrdiff_t stride, int32_t bw, int32_t bh, const uint8_t *above, const uint8_t *left, int32_t upsample_left, int32_t dx, int32_t dy);
+diff --git a/test/CMakeLists.txt b/test/CMakeLists.txt
+index b09b7599..eac9f5c8 100644
+--- a/test/CMakeLists.txt
++++ b/test/CMakeLists.txt
+@@ -110,6 +110,7 @@ set(multi_arch_files
+     hadamard_test.cc
+     intrapred_cfl_test.cc
+     intrapred_dr_test.cc
++    intrapred_edge_filter_test.cc
+     intrapred_test.cc
+     quantize_func_test.cc
+     selfguided_filter_test.cc
+@@ -136,7 +137,6 @@ if(HAVE_X86_PLATFORM)
+       corner_match_test.cc
+       dwt_test.cc
+       frame_error_test.cc
+-      intrapred_edge_filter_test.cc
+       subtract_avg_cfl_test.cc)
+ endif()
+ 
+diff --git a/test/intrapred_edge_filter_test.cc b/test/intrapred_edge_filter_test.cc
+index cf154437..e1dc1fde 100644
+--- a/test/intrapred_edge_filter_test.cc
++++ b/test/intrapred_edge_filter_test.cc
+@@ -14,9 +14,9 @@
+  * @file intrapred_edge_filter_test.cc
+  *
+  * @brief Unit test for upsample and edge filter:
+- * - svt_av1_upsample_intra_edge_sse4_1
+- * - svt_av1_filter_intra_edge_sse4_1
+- * - svt_av1_filter_intra_edge_high_sse4_1
++ * - svt_av1_upsample_intra_edge
++ * - svt_av1_filter_intra_edge
++ * - svt_av1_filter_intra_edge_high
+  *
+  * @author Cidana-Wenyao
+  *
+@@ -39,7 +39,7 @@ using UPSAMPLE_LBD = void (*)(uint8_t *p, int size);
+ /**
+  * @brief Unit test for upsample in intra prediction specified in
+  * spec 7.11.2.11:
+- * - svt_av1_upsample_intra_edge_sse4_1
++ * - svt_av1_upsample_intra_edge
+  *
+  * Test strategy:
+  * Verify this assembly code by comparing with reference c implementation.
+@@ -117,13 +117,16 @@ class UpsampleTest : public ::testing::TestWithParam<UPSAMPLE_LBD> {
+     int numPx_;
+     int bd_;
+ };
++GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(UpsampleTest);
+ 
+ TEST_P(UpsampleTest, RunTest) {
+     RunTest();
+ }
+ 
++#if ARCH_X86_64
+ INSTANTIATE_TEST_SUITE_P(SSE4_1, UpsampleTest,
+                          ::testing::Values(svt_av1_upsample_intra_edge_sse4_1));
++#endif  // ARCH_X86_64
+ 
+ // -----------------------------------------------------------------------------
+ // Filter edge Tests
+@@ -139,8 +142,8 @@ using FILTER_EDGE_HBD = void (*)(uint16_t *p, int size, int strength);
+ 
+ /**
+  * @brief Unit test for edge filter in intra prediction:
+- * - svt_av1_filter_intra_edge_sse4_1
+- * - svt_av1_filter_intra_edge_high_sse4_1
++ * - svt_av1_filter_intra_edge
++ * - svt_av1_filter_intra_edge_high
+  *
+  * Test strategy:
+  * Verify this assembly code by comparing with reference c implementation.
+@@ -237,8 +240,15 @@ TEST_P(LowbdFilterEdgeTest, RunTest) {
+     RunTest();
+ }
+ 
++#if ARCH_X86_64
+ INSTANTIATE_TEST_SUITE_P(SSE4_1, LowbdFilterEdgeTest,
+                          ::testing::Values(svt_av1_filter_intra_edge_sse4_1));
++#endif  // ARCH_X86_64
++
++#if ARCH_AARCH64
++INSTANTIATE_TEST_SUITE_P(NEON, LowbdFilterEdgeTest,
++                         ::testing::Values(svt_av1_filter_intra_edge_neon));
++#endif  // ARCH_AARCH64
+ 
+ class HighbdFilterEdgeTest : public FilterEdgeTest<uint16_t, FILTER_EDGE_HBD> {
+   public:
+@@ -248,12 +258,15 @@ class HighbdFilterEdgeTest : public FilterEdgeTest<uint16_t, FILTER_EDGE_HBD> {
+         bd_ = 10;
+     }
+ };
++GTEST_ALLOW_UNINSTANTIATED_PARAMETERIZED_TEST(HighbdFilterEdgeTest);
+ 
+ TEST_P(HighbdFilterEdgeTest, RunTest) {
+     RunTest();
+ }
+ 
++#if ARCH_X86_64
+ INSTANTIATE_TEST_SUITE_P(
+     SSE4_1, HighbdFilterEdgeTest,
+     ::testing::Values(svt_av1_filter_intra_edge_high_sse4_1));
++#endif  // ARCH_X86_64
+ }  // namespace
+-- 
+2.36.0.windows.1
+
