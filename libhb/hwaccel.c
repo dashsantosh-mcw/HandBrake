@@ -261,6 +261,8 @@ static int is_encoder_supported(int encoder_id)
         case HB_VCODEC_VT_H264:
         case HB_VCODEC_VT_H265:
         case HB_VCODEC_VT_H265_10BIT:
+        case HB_VCODEC_FFMPEG_MF_H264:
+        case HB_VCODEC_FFMPEG_MF_H265:
             return 1;
         default:
             return 0;
@@ -280,6 +282,10 @@ static int are_filters_supported(hb_list_t *filters, int hw_decode)
     if (hw_decode & HB_DECODE_SUPPORT_NVDEC)
     {
         ret = hb_nvenc_are_filters_supported(filters);
+    }
+    if (hw_decode & HB_DECODE_SUPPORT_MF)
+    {
+        ret = 1;
     }
 
     return ret;
