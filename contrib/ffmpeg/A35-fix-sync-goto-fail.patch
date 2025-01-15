@@ -1,0 +1,35 @@
+From 81af60099d95bfe59022519d8489c7933bcb858d Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Mon, 30 Dec 2024 22:41:03 -0800
+Subject: [PATCH 2/2] fix: sync goto fail
+
+---
+ libavcodec/mfenc.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/mfenc.c b/libavcodec/mfenc.c
+index 85fa2942b1..72e35d7011 100644
+--- a/libavcodec/mfenc.c
++++ b/libavcodec/mfenc.c
+@@ -607,14 +607,16 @@ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+     if (ret != AVERROR(EAGAIN))
+         av_frame_unref(c->frame);
+     if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+-        return ret;
++        goto fail;
+ 
+     ret = mf_receive_sample(avctx, &sample);
+     if (ret < 0)
+-        return ret;
++        goto fail;
+ 
+     ret = mf_sample_to_avpacket(avctx, sample, avpkt);
+     IMFSample_Release(sample);
++
++fail:
+     c->device_hwctx->unlock(c->device_hwctx->lock_ctx); 
+     return ret;
+ }
+-- 
+2.34.1
+

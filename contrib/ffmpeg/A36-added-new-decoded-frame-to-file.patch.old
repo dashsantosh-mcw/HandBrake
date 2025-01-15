@@ -1,0 +1,178 @@
+From db7b14a1cb8735569d7893e9db3f32d7890809a6 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Thu, 2 Jan 2025 15:00:46 -0800
+Subject: [PATCH] added-new-decoded-frame-to-file
+
+---
+ libavcodec/mfenc.c           | 20 +++++++----
+ libavfilter/vf_scale_d3d11.c | 69 ++++++++++++++++++++++++++++++++++--
+ 2 files changed, 80 insertions(+), 9 deletions(-)
+
+diff --git a/libavcodec/mfenc.c b/libavcodec/mfenc.c
+index 72e35d7011..14eadc966c 100644
+--- a/libavcodec/mfenc.c
++++ b/libavcodec/mfenc.c
+@@ -569,9 +569,11 @@ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+         if (ret < 0 && ret != AVERROR_EOF)
+             return ret;
+     }
+-    if(c->device_hwctx){
+-        c->device_hwctx->lock(c->device_hwctx->lock_ctx); 
++
++    if (c->device_hwctx) {
++        c->device_hwctx->lock(c->device_hwctx->lock_ctx);
+     }
++
+     if (c->frame->buf[0]) {
+         sample = mf_avframe_to_sample(avctx, c->frame);
+         if (!sample) {
+@@ -584,17 +586,16 @@ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+         }
+     }
+ 
+-    if(!c->stream_started)
+-    {
++    if (!c->stream_started) {
+         HRESULT hr = IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+         if (FAILED(hr)) {
+-            av_log(avctx, AV_LOG_ERROR, "could not start streaming (%s)\n", ff_hr_str(hr));
++            av_log(avctx, AV_LOG_ERROR, "Could not start streaming (%s)\n", ff_hr_str(hr));
+             return AVERROR(EBADMSG);
+         }
+ 
+         hr = IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+         if (FAILED(hr)) {
+-            av_log(avctx, AV_LOG_ERROR, "could not start stream (%s)\n", ff_hr_str(hr));
++            av_log(avctx, AV_LOG_ERROR, "Could not start stream (%s)\n", ff_hr_str(hr));
+             return AVERROR(EBADMSG);
+         }
+ 
+@@ -604,8 +605,10 @@ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+     ret = mf_send_sample(avctx, sample);
+     if (sample)
+         IMFSample_Release(sample);
++
+     if (ret != AVERROR(EAGAIN))
+         av_frame_unref(c->frame);
++
+     if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+         goto fail;
+ 
+@@ -617,10 +620,13 @@ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+     IMFSample_Release(sample);
+ 
+ fail:
+-    c->device_hwctx->unlock(c->device_hwctx->lock_ctx); 
++    if (c->device_hwctx)
++        c->device_hwctx->unlock(c->device_hwctx->lock_ctx);
++
+     return ret;
+ }
+ 
++
+ // Most encoders seem to enumerate supported audio formats on the output types,
+ // at least as far as channel configuration and sample rate is concerned. Pick
+ // the one which seems to match best.
+diff --git a/libavfilter/vf_scale_d3d11.c b/libavfilter/vf_scale_d3d11.c
+index f6b9252f03..136df0bd27 100644
+--- a/libavfilter/vf_scale_d3d11.c
++++ b/libavfilter/vf_scale_d3d11.c
+@@ -36,6 +36,63 @@ static int d3d11scale_init(AVFilterContext* ctx) {
+     return 0;
+ }
+ 
++// Function to write frame data to a file
++static int write_frame_to_file(ID3D11Device *device, ID3D11DeviceContext *context, 
++                               ID3D11Texture2D *vp_output_texture, int width, int height, 
++                               const char *output_filename, void *ctx) {
++    HRESULT hr;
++
++    // Create a staging texture for reading
++    D3D11_TEXTURE2D_DESC stagingDesc = {
++        .Width = width,
++        .Height = height,
++        .MipLevels = 1,
++        .ArraySize = 1,
++        .Format = DXGI_FORMAT_NV12,
++        .SampleDesc = { .Count = 1 },
++        .Usage = D3D11_USAGE_STAGING,
++        .BindFlags = 0,
++        .CPUAccessFlags = D3D11_CPU_ACCESS_READ,
++    };
++
++    ID3D11Texture2D *stagingTexture = NULL;
++    hr = device->lpVtbl->CreateTexture2D(device, &stagingDesc, NULL, &stagingTexture);
++    if (FAILED(hr)) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to create staging texture: HRESULT 0x%lX\n", hr);
++        return AVERROR_EXTERNAL;
++    }
++
++    // Copy the data from the output texture to the staging texture
++    context->lpVtbl->CopyResource(context, stagingTexture, vp_output_texture);
++
++    // Map the staging texture to access data
++    D3D11_MAPPED_SUBRESOURCE mappedResource;
++    hr = context->lpVtbl->Map(context, stagingTexture, 0, D3D11_MAP_READ, 0, &mappedResource);
++    if (SUCCEEDED(hr)) {
++        FILE *file = fopen(output_filename, "wb");
++        if (file) {
++            // Write Y plane
++            uint8_t *data = (uint8_t *)mappedResource.pData;
++            for (int y = 0; y < height; y++) {
++                fwrite(data + y * mappedResource.RowPitch, 1, width, file);
++            }
++            // Write UV plane
++            uint8_t *uv_data = data + height * mappedResource.RowPitch;
++            for (int y = 0; y < height / 2; y++) {
++                fwrite(uv_data + y * mappedResource.RowPitch, 1, width, file);
++            }
++            fclose(file);
++        } else {
++            av_log(ctx, AV_LOG_ERROR, "Failed to open file for writing: %s\n", output_filename);
++        }
++        context->lpVtbl->Unmap(context, stagingTexture, 0);
++    } else {
++        av_log(ctx, AV_LOG_ERROR, "Failed to map staging texture: HRESULT 0x%lX\n", hr);
++    }
++
++    stagingTexture->lpVtbl->Release(stagingTexture);
++    return 0;
++}
+ 
+ static int d3d11scale_configure_processor(D3D11ScaleContext *s, AVFilterContext *ctx) {
+     HRESULT hr;
+@@ -132,7 +189,7 @@ static int d3d11scale_filter_frame(AVFilterLink* inlink, AVFrame* in)
+     AVFrame *out = NULL;
+     int ret;
+ 
+-    // av_log(ctx, AV_LOG_INFO, "Inside Filter_frame function!\n");
++    av_log(ctx, AV_LOG_INFO, "Inside Filter_frame function!\n");
+ 
+     // Validate input hw_frames_ctx
+     if (!in->hw_frames_ctx) {
+@@ -218,13 +275,21 @@ static int d3d11scale_filter_frame(AVFilterLink* inlink, AVFrame* in)
+     s->context->lpVtbl->QueryInterface(s->context, &IID_ID3D11VideoContext, (void**)&videoContext);
+ 
+     hr = videoContext->lpVtbl->VideoProcessorBlt(videoContext, s->processor, s->outputView, 0, 1, &stream);
+-    // av_log(ctx, AV_LOG_VERBOSE, "After VideoProcessorBlt function!!!!!!!!\n");
++    av_log(ctx, AV_LOG_VERBOSE, "After VideoProcessorBlt function!!!!!!!!\n");
+     if (FAILED(hr)) {
+         av_log(ctx, AV_LOG_ERROR, "VideoProcessorBlt failed: HRESULT 0x%lX\n", hr);
+         av_frame_free(&in);
+         av_frame_free(&out);
+         return AVERROR_EXTERNAL;
+     }
++    char output_filename[256];
++    static int frame_index = 0;
++    snprintf(output_filename, sizeof(output_filename), "scaled_frame_%d.raw", frame_index++);
++    int return_value = write_frame_to_file(s->device, s->context, s->d3d11_vp_output_texture, s->width, s->height, output_filename, ctx);
++    if (return_value < 0) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to write frame %d to file\n", frame_index - 1);
++    }
++
+     s->encoder_requires_software_frame = 0;
+     av_log(ctx, AV_LOG_VERBOSE, "After VideoProcessorBlt function the format is %s\n", av_get_pix_fmt_name(outlink->format));
+     // outl->format != AV_PIX_FMT_D3D11
+-- 
+2.34.1
+

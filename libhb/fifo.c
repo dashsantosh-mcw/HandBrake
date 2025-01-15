@@ -643,6 +643,7 @@ int hb_buffer_is_writable(const hb_buffer_t *buf)
 
 static int copy_hwframe_to_video_buffer(const AVFrame *frame, hb_buffer_t *buf)
 {
+    // hb_log("fifo: copy_hwframe_to_video_buffer");
     int ret;
     AVFrame *hw_frame = av_frame_alloc();
 
@@ -725,6 +726,7 @@ hb_buffer_t * hb_buffer_dup(const hb_buffer_t *src)
 
         // If it's an hardware frame, make a copy
         // into another hardware AVFrame.
+        // hb_log("fifo buffer_dup: hw_frames_ctx %p", frame->hw_frames_ctx);
         if (frame->hw_frames_ctx)
         {
 #ifdef __APPLE__

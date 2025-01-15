@@ -1,0 +1,842 @@
+From c44c0bd0597e101a33c1d27174db2733651e9f7b Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Mon, 25 Nov 2024 08:25:59 -0800
+Subject: [PATCH 1/4] vpblt-single-commit
+
+---
+ libavcodec/dxva2.c           |   3 +-
+ libavcodec/mf_utils.h        |   7 +
+ libavcodec/mfenc.c           | 186 ++++++++++----
+ libavfilter/Makefile         |   1 +
+ libavfilter/allfilters.c     |   1 +
+ libavfilter/vf_scale_d3d11.c | 459 +++++++++++++++++++++++++++++++++++
+ 6 files changed, 611 insertions(+), 46 deletions(-)
+ create mode 100644 libavfilter/vf_scale_d3d11.c
+
+diff --git a/libavcodec/dxva2.c b/libavcodec/dxva2.c
+index 22ecd5acaf..193e4d2c29 100644
+--- a/libavcodec/dxva2.c
++++ b/libavcodec/dxva2.c
+@@ -631,7 +631,7 @@ int ff_dxva2_common_frame_params(AVCodecContext *avctx,
+                             AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
+     frames_ctx->width = FFALIGN(avctx->coded_width, surface_alignment);
+     frames_ctx->height = FFALIGN(avctx->coded_height, surface_alignment);
+-    frames_ctx->initial_pool_size = num_surfaces;
++    frames_ctx->initial_pool_size = 20;
+ 
+ 
+ #if CONFIG_DXVA2
+@@ -647,6 +647,7 @@ int ff_dxva2_common_frame_params(AVCodecContext *avctx,
+         AVD3D11VAFramesContext *frames_hwctx = frames_ctx->hwctx;
+ 
+         frames_hwctx->BindFlags |= D3D11_BIND_DECODER;
++        frames_hwctx->BindFlags |= D3D11_BIND_VIDEO_ENCODER;
+     }
+ #endif
+ 
+diff --git a/libavcodec/mf_utils.h b/libavcodec/mf_utils.h
+index a59b36d015..ecebb6fcdf 100644
+--- a/libavcodec/mf_utils.h
++++ b/libavcodec/mf_utils.h
+@@ -53,6 +53,13 @@ typedef struct MFFunctions {
+                                                    IMFMediaBuffer **ppBuffer);
+     HRESULT (WINAPI *MFCreateSample) (IMFSample **ppIMFSample);
+     HRESULT (WINAPI *MFCreateMediaType) (IMFMediaType **ppMFType);
++    HRESULT (WINAPI *MFCreateDXGISurfaceBuffer) (REFIID riid,
++                                IUnknown* punkSurface,
++                                UINT uSubresourceIndex,
++                                BOOL fBottomUpWhenLinear,
++                                IMFMediaBuffer** ppBuffer);
++    HRESULT (WINAPI *MFCreateDXGIDeviceManager) (UINT* resetToken,
++                                                IMFDXGIDeviceManager** ppDeviceManager);
+     // MFTEnumEx is missing in Windows Vista's mfplat.dll.
+     HRESULT (WINAPI *MFTEnumEx)(GUID guidCategory, UINT32 Flags,
+                                 const MFT_REGISTER_TYPE_INFO *pInputType,
+diff --git a/libavcodec/mfenc.c b/libavcodec/mfenc.c
+index c062d87f11..24fc5b881e 100644
+--- a/libavcodec/mfenc.c
++++ b/libavcodec/mfenc.c
+@@ -31,10 +31,20 @@
+ #include "codec_internal.h"
+ #include "internal.h"
+ #include "compat/w32dlfcn.h"
++#if CONFIG_D3D11VA
++#include "libavutil/hwcontext_d3d11va.h"
++#endif
+ 
+ typedef struct MFContext {
+     AVClass *av_class;
+     HMODULE library;
++    HMODULE d3d_dll;
++    // ID3D11Device* d3d_device;
++    // ID3D11VideoDevice* d3d_videoDevice;
++    ID3D11DeviceContext* d3d_context;
++    IMFDXGIDeviceManager *dxgiManager;
++    int resetToken;
++   
+     MFFunctions functions;
+     AVFrame *frame;
+     int is_video, is_audio;
+@@ -47,6 +57,7 @@ typedef struct MFContext {
+     int out_stream_provides_samples;
+     int draining, draining_done;
+     int sample_sent;
++    int stream_started;
+     int async_need_input, async_have_output, async_marker;
+     int64_t reorder_delay;
+     ICodecAPI *codec_api;
+@@ -308,45 +319,104 @@ static IMFSample *mf_v_avframe_to_sample(AVCodecContext *avctx, const AVFrame *f
+     MFContext *c = avctx->priv_data;
+     IMFSample *sample;
+     IMFMediaBuffer *buffer;
++    ID3D11Texture2D *d3d11_texture = NULL;
++    D3D11_TEXTURE2D_DESC desc;
++    int subIdx = 0;
+     BYTE *data;
+     HRESULT hr;
+     int ret;
+     int size;
++ 
++    MFFunctions *func = &c->functions;
++    AVHWFramesContext* frames_ctx = NULL; 
++    AVD3D11VADeviceContext* device_hwctx = NULL;
++
++    if (frame->format == AV_PIX_FMT_D3D11) {
++    frames_ctx = (AVHWFramesContext*)frame->hw_frames_ctx->data; 
++    device_hwctx = (AVD3D11VADeviceContext*)frames_ctx->device_ctx->hwctx;
++
++    if(!c->dxgiManager){
++        hr = func->MFCreateDXGIDeviceManager(&c->resetToken, &c->dxgiManager);
++        if (SUCCEEDED(hr)) {
++            hr = IMFDXGIDeviceManager_ResetDevice(c->dxgiManager, device_hwctx->device, c->resetToken);
++            if (FAILED(hr)) {
++                av_log(avctx, AV_LOG_ERROR, "failed to reset device: %s\n", ff_hr_str(hr));
++            }
++        }
++        hr = IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_SET_D3D_MANAGER, (ULONG_PTR)c->dxgiManager);
++        if (FAILED(hr)){
++            av_log(avctx, AV_LOG_ERROR, "failed to set manager: %s\n", ff_hr_str(hr));
++        }
++    }
+ 
+-    size = av_image_get_buffer_size(avctx->pix_fmt, avctx->width, avctx->height, 1);
+-    if (size < 0)
+-        return NULL;
++    device_hwctx->lock(device_hwctx->lock_ctx); // Locking hardware context
++        d3d11_texture = (ID3D11Texture2D *)frame->data[0];
++        subIdx = (int)(intptr_t)frame->data[1];
++        if (!d3d11_texture)
++        {
++            av_log(avctx, AV_LOG_ERROR, "texture not found \n");
++            return NULL;
++        }
++       
++        hr = func->MFCreateSample(&sample);
++       
++        if (FAILED(hr))
++            return NULL;
++        hr = func->MFCreateDXGISurfaceBuffer(&IID_ID3D11Texture2D, d3d11_texture, subIdx, 0, &buffer);
+ 
+-    sample = ff_create_memory_sample(&c->functions, NULL, size,
+-                                     c->in_info.cbAlignment);
+-    if (!sample)
+-        return NULL;
++        if (FAILED(hr)) {
++            IMFSample_Release(sample);
++            return NULL;
++        }
+ 
+-    hr = IMFSample_GetBufferByIndex(sample, 0, &buffer);
+-    if (FAILED(hr)) {
+-        IMFSample_Release(sample);
+-        return NULL;
+-    }
++        hr = IMFSample_AddBuffer(sample, buffer);
++        if (FAILED(hr)) {
++            IMFSample_Release(sample);
++            return NULL;
++        }
+ 
+-    hr = IMFMediaBuffer_Lock(buffer, &data, NULL, NULL);
+-    if (FAILED(hr)) {
+         IMFMediaBuffer_Release(buffer);
+-        IMFSample_Release(sample);
+-        return NULL;
+-    }
+ 
+-    ret = av_image_copy_to_buffer((uint8_t *)data, size, (void *)frame->data, frame->linesize,
+-                                  avctx->pix_fmt, avctx->width, avctx->height, 1);
+-    IMFMediaBuffer_SetCurrentLength(buffer, size);
+-    IMFMediaBuffer_Unlock(buffer);
+-    IMFMediaBuffer_Release(buffer);
+-    if (ret < 0) {
+-        IMFSample_Release(sample);
+-        return NULL;
+-    }
++    
+ 
+-    IMFSample_SetSampleDuration(sample, mf_to_mf_time(avctx, frame->duration));
++    } else {
++        size = av_image_get_buffer_size(avctx->pix_fmt, avctx->width, avctx->height, 1);
++        if (size < 0)
++            return NULL;
++
++        sample = ff_create_memory_sample(&c->functions, NULL, size,
++                                        c->in_info.cbAlignment);
++        if (!sample)
++            return NULL;
+ 
++        hr = IMFSample_GetBufferByIndex(sample, 0, &buffer);
++        if (FAILED(hr)) {
++            IMFSample_Release(sample);
++            return NULL;
++        }
++
++        hr = IMFMediaBuffer_Lock(buffer, &data, NULL, NULL);
++        if (FAILED(hr)) {
++            IMFMediaBuffer_Release(buffer);
++            IMFSample_Release(sample);
++            return NULL;
++        }
++
++        ret = av_image_copy_to_buffer((uint8_t *)data, size, (void *)frame->data, frame->linesize,
++                                    avctx->pix_fmt, avctx->width, avctx->height, 1);
++        IMFMediaBuffer_SetCurrentLength(buffer, size);
++        IMFMediaBuffer_Unlock(buffer);
++        IMFMediaBuffer_Release(buffer);
++        if (ret < 0) {
++            IMFSample_Release(sample);
++            return NULL;
++        }
++    }
++    IMFSample_SetSampleTime(sample, mf_to_mf_time(avctx, frame->pts));
++    IMFSample_SetSampleDuration(sample, mf_to_mf_time(avctx, frame->duration));
++  
++    if(device_hwctx)
++        device_hwctx->unlock(device_hwctx->lock_ctx);
+     return sample;
+ }
+ 
+@@ -487,6 +557,7 @@ static int mf_receive_sample(AVCodecContext *avctx, IMFSample **out_sample)
+     return ret;
+ }
+ 
++// static int frameCount = 0;
+ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+ {
+     MFContext *c = avctx->priv_data;
+@@ -511,6 +582,23 @@ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+         }
+     }
+ 
++    if(!c->stream_started)
++    {
++        HRESULT hr = IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
++        if (FAILED(hr)) {
++            av_log(avctx, AV_LOG_ERROR, "could not start streaming (%s)\n", ff_hr_str(hr));
++            return AVERROR(EBADMSG);
++        }
++
++        hr = IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
++        if (FAILED(hr)) {
++            av_log(avctx, AV_LOG_ERROR, "could not start stream (%s)\n", ff_hr_str(hr));
++            return AVERROR(EBADMSG);
++        }
++
++        c->stream_started = 1;
++    }
++
+     ret = mf_send_sample(avctx, sample);
+     if (sample)
+         IMFSample_Release(sample);
+@@ -732,8 +820,16 @@ FF_ENABLE_DEPRECATION_WARNINGS
+ static int64_t mf_encv_input_score(AVCodecContext *avctx, IMFMediaType *type)
+ {
+     enum AVPixelFormat pix_fmt = ff_media_type_to_pix_fmt((IMFAttributes *)type);
+-    if (pix_fmt != avctx->pix_fmt)
+-        return -1; // can not use
++
++    if (avctx->pix_fmt == AV_PIX_FMT_D3D11) {
++        if (pix_fmt != AV_PIX_FMT_NV12) {
++            return -1; // can not use
++        }
++    }
++    else {
++        if (pix_fmt != avctx->pix_fmt)
++            return -1; // can not use
++    }
+ 
+     return 0;
+ }
+@@ -741,9 +837,16 @@ static int64_t mf_encv_input_score(AVCodecContext *avctx, IMFMediaType *type)
+ static int mf_encv_input_adjust(AVCodecContext *avctx, IMFMediaType *type)
+ {
+     enum AVPixelFormat pix_fmt = ff_media_type_to_pix_fmt((IMFAttributes *)type);
+-    if (pix_fmt != avctx->pix_fmt) {
+-        av_log(avctx, AV_LOG_ERROR, "unsupported input pixel format set\n");
+-        return AVERROR(EINVAL);
++    if (avctx->pix_fmt == AV_PIX_FMT_D3D11) {
++        if (pix_fmt != AV_PIX_FMT_NV12 && pix_fmt != AV_PIX_FMT_D3D11) {
++            av_log(avctx, AV_LOG_ERROR, "unsupported input pixel format set\n");
++            return AVERROR(EINVAL);
++        }
++    } else {
++        if (pix_fmt != avctx->pix_fmt) {
++            av_log(avctx, AV_LOG_ERROR, "unsupported input pixel format set\n");
++            return AVERROR(EINVAL);
++        }
+     }
+ 
+     //ff_MFSetAttributeSize((IMFAttributes *)type, &MF_MT_FRAME_SIZE, avctx->width, avctx->height);
+@@ -1111,18 +1214,6 @@ static int mf_init_encoder(AVCodecContext *avctx)
+     if ((ret = mf_setup_context(avctx)) < 0)
+         return ret;
+ 
+-    hr = IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+-    if (FAILED(hr)) {
+-        av_log(avctx, AV_LOG_ERROR, "could not start streaming (%s)\n", ff_hr_str(hr));
+-        return AVERROR_EXTERNAL;
+-    }
+-
+-    hr = IMFTransform_ProcessMessage(c->mft, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+-    if (FAILED(hr)) {
+-        av_log(avctx, AV_LOG_ERROR, "could not start stream (%s)\n", ff_hr_str(hr));
+-        return AVERROR_EXTERNAL;
+-    }
+-
+     if (avctx->flags & AV_CODEC_FLAG_GLOBAL_HEADER && c->async_events &&
+         c->is_video && !avctx->extradata) {
+         int sleep = 10000, total = 0;
+@@ -1180,6 +1271,7 @@ static int mf_load_library(AVCodecContext *avctx)
+ 
+ #if !HAVE_UWP
+     c->library = dlopen("mfplat.dll", 0);
++    c->d3d_dll = dlopen("D3D11.dll", 0);
+ 
+     if (!c->library) {
+         av_log(c, AV_LOG_ERROR, "DLL mfplat.dll failed to open\n");
+@@ -1192,6 +1284,8 @@ static int mf_load_library(AVCodecContext *avctx)
+     LOAD_MF_FUNCTION(c, MFCreateAlignedMemoryBuffer);
+     LOAD_MF_FUNCTION(c, MFCreateSample);
+     LOAD_MF_FUNCTION(c, MFCreateMediaType);
++    LOAD_MF_FUNCTION(c, MFCreateDXGISurfaceBuffer);
++    LOAD_MF_FUNCTION(c, MFCreateDXGIDeviceManager);
+     // MFTEnumEx is missing in Windows Vista's mfplat.dll.
+     LOAD_MF_FUNCTION(c, MFTEnumEx);
+ 
+@@ -1213,6 +1307,7 @@ static int mf_close(AVCodecContext *avctx)
+         ff_free_mf(&c->functions, &c->mft);
+ 
+     dlclose(c->library);
++    dlclose(c->d3d_dll);
+     c->library = NULL;
+ #else
+     ff_free_mf(&c->functions, &c->mft);
+@@ -1307,6 +1402,7 @@ static const FFCodecDefault defaults[] = {
+ 
+ #define VFMTS \
+         .p.pix_fmts     = (const enum AVPixelFormat[]){ AV_PIX_FMT_NV12,       \
++                                                        AV_PIX_FMT_D3D11,       \
+                                                         AV_PIX_FMT_YUV420P,    \
+                                                         AV_PIX_FMT_NONE },
+ #define VCAPS \
+@@ -1315,4 +1411,4 @@ static const FFCodecDefault defaults[] = {
+ 
+ MF_ENCODER(VIDEO, h264,        H264, venc_opts, VFMTS, VCAPS, defaults);
+ MF_ENCODER(VIDEO, hevc,        HEVC, venc_opts, VFMTS, VCAPS, defaults);
+-MF_ENCODER(VIDEO, av1,         AV1,  venc_opts, VFMTS, VCAPS, defaults);
++MF_ENCODER(VIDEO, av1,       AV1, venc_opts, VFMTS, VCAPS, defaults);
+\ No newline at end of file
+diff --git a/libavfilter/Makefile b/libavfilter/Makefile
+index 4d9681768b..3fb4d58a16 100644
+--- a/libavfilter/Makefile
++++ b/libavfilter/Makefile
+@@ -461,6 +461,7 @@ OBJS-$(CONFIG_ROBERTS_OPENCL_FILTER)         += vf_convolution_opencl.o opencl.o
+ OBJS-$(CONFIG_ROTATE_FILTER)                 += vf_rotate.o
+ OBJS-$(CONFIG_SAB_FILTER)                    += vf_sab.o
+ OBJS-$(CONFIG_SCALE_FILTER)                  += vf_scale.o scale_eval.o framesync.o
++OBJS-$(CONFIG_SCALE_D3D11_FILTER)            += vf_scale_d3d11.o
+ OBJS-$(CONFIG_SCALE_CUDA_FILTER)             += vf_scale_cuda.o scale_eval.o \
+                                                 vf_scale_cuda.ptx.o cuda/load_helper.o
+ OBJS-$(CONFIG_SCALE_NPP_FILTER)              += vf_scale_npp.o scale_eval.o
+diff --git a/libavfilter/allfilters.c b/libavfilter/allfilters.c
+index 9819f0f95b..d8516fde45 100644
+--- a/libavfilter/allfilters.c
++++ b/libavfilter/allfilters.c
+@@ -431,6 +431,7 @@ extern const AVFilter ff_vf_roberts_opencl;
+ extern const AVFilter ff_vf_rotate;
+ extern const AVFilter ff_vf_sab;
+ extern const AVFilter ff_vf_scale;
++extern const AVFilter ff_vf_scale_d3d11;
+ extern const AVFilter ff_vf_scale_cuda;
+ extern const AVFilter ff_vf_scale_npp;
+ extern const AVFilter ff_vf_scale_qsv;
+diff --git a/libavfilter/vf_scale_d3d11.c b/libavfilter/vf_scale_d3d11.c
+new file mode 100644
+index 0000000000..1f53f10a5d
+--- /dev/null
++++ b/libavfilter/vf_scale_d3d11.c
+@@ -0,0 +1,459 @@
++#include "libavutil/opt.h"
++#include "libavfilter/avfilter.h"
++#include "libavfilter/scale_eval.h"
++#include "libavutil/pixdesc.h"
++#include "video.h"
++#include "compat/w32dlfcn.h"
++#include "libavcodec/mf_utils.h"
++
++#if CONFIG_D3D11VA
++#include "libavutil/hwcontext_d3d11va.h"
++#endif
++
++typedef struct D3D11ScaleContext {
++    const AVClass* classCtx;
++    HMODULE d3d_dll;
++    char *w_expr;
++    char *h_expr;
++    ID3D11Device* device;
++    ID3D11DeviceContext* context;
++    ID3D11VideoProcessor* processor;
++    ID3D11VideoProcessorEnumerator* enumerator;
++    ID3D11VideoProcessorOutputView* outputView;
++    ID3D11VideoProcessorInputView* inputView;
++    ID3D11Texture2D* d3d11_vp_output_texture;
++    ID3D11VideoDevice* videoDevice;
++    // ID3D11Texture2D** texturePool;
++    // ID3D11VideoProcessorOutputView** outputViews; 
++    AVBufferRef* hw_device_ctx;
++    AVCodecContext* hw_frames_ctx;
++    void *priv;
++    int width, height;
++int inputWidth, inputHeight;
++} D3D11ScaleContext;
++// Forward declaration
++// int create_texture_pool_and_views(D3D11ScaleContext *s, AVFilterContext *ctx);
++
++// static int d3d11scale_init(AVFilterContext* ctx) {
++//     av_log(ctx, AV_LOG_VERBOSE, "D3D11 INIT called!!!!!!!!!\n");
++//     D3D11ScaleContext* s = ctx->priv;
++//     HRESULT hr;
++//     s->d3d_dll = LoadLibrary("D3D11.dll");
++//     if (!s->d3d_dll) {
++//         av_log(ctx, AV_LOG_ERROR, "Failed to load D3D11.dll\n");
++//         return AVERROR_EXTERNAL;
++//     }
++//     int err = 0;
++
++//     if ((err = av_hwdevice_ctx_create(&s->hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA,
++//                                       NULL, NULL, 0)) < 0) {
++//         fprintf(stderr, "Failed to create specified HW device.\n");
++//         return err;
++//     }
++//     av_log(ctx, AV_LOG_INFO, "Filter Device: %p, Context: %p\n", s->device, s->context);
++//     ctx->hw_device_ctx = av_buffer_ref(s->hw_device_ctx);
++//     if (!ctx->hw_device_ctx) {
++//     av_log(ctx, AV_LOG_ERROR, "Failed to create buffer reference for D3D11 hardware device.\n");
++//     return AVERROR(ENOMEM);
++//     }
++//     av_log(ctx, AV_LOG_VERBOSE, "D3D11 device created\n");
++//     return 0;
++// }
++static int d3d11scale_init(AVFilterContext* ctx) {
++    D3D11ScaleContext* s = ctx->priv;
++
++    // if (!ctx->inputs[0]->hw_frames_ctx) {
++    //     av_log(ctx, AV_LOG_ERROR, "No hardware frames context provided on input.\n");
++    //     return AVERROR(EINVAL);
++    // }
++
++    // AVHWFramesContext *frames_ctx = (AVHWFramesContext *)ctx->inputs[0]->hw_frames_ctx->data;
++    // s->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
++    // if (!s->hw_device_ctx) {
++    //     av_log(ctx, AV_LOG_ERROR, "Failed to reference hardware device context from input.\n");
++    //     return AVERROR(ENOMEM);
++    // }
++
++    // AVHWDeviceContext *hwctx = (AVHWDeviceContext *)s->hw_device_ctx->data;
++    // AVD3D11VADeviceContext *d3d11_hwctx = (AVD3D11VADeviceContext *)hwctx->hwctx;
++    // s->device = (ID3D11Device *)d3d11_hwctx->device;
++    // s->context = d3d11_hwctx->device_context;
++    return 0;
++}
++
++
++static int d3d11scale_configure_processor(D3D11ScaleContext *s, AVFilterContext *ctx) {
++    HRESULT hr;
++
++    // Get D3D11 device and context from hardware device context
++    AVHWDeviceContext *hwctx = (AVHWDeviceContext *)s->hw_device_ctx->data;
++    AVD3D11VADeviceContext *d3d11_hwctx = (AVD3D11VADeviceContext *)hwctx->hwctx;
++    s->device = (ID3D11Device *)d3d11_hwctx->device;
++    s->context = d3d11_hwctx->device_context;
++
++    av_log(ctx, AV_LOG_VERBOSE, "Configuring D3D11 video processor.\n");
++
++    // Define the video processor content description
++    D3D11_VIDEO_PROCESSOR_CONTENT_DESC contentDesc = {
++        .InputFrameFormat = D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
++        .InputWidth = s->inputWidth,
++        .InputHeight = s->inputHeight,
++        .OutputWidth = s->width,
++        .OutputHeight = s->height,
++        .Usage = D3D11_VIDEO_USAGE_PLAYBACK_NORMAL,
++    };
++
++    // Query video device interface
++    hr = s->device->lpVtbl->QueryInterface(s->device, &IID_ID3D11VideoDevice, (void **)&s->videoDevice);
++    if (FAILED(hr)) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to get D3D11 video device interface: HRESULT 0x%lX.\n", hr);
++        return AVERROR_EXTERNAL;
++    }
++
++    // Create video processor enumerator
++    hr = s->videoDevice->lpVtbl->CreateVideoProcessorEnumerator(s->videoDevice, &contentDesc, &s->enumerator);
++    if (FAILED(hr)) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to create video processor enumerator: HRESULT 0x%lX.\n", hr);
++        return AVERROR_EXTERNAL;
++    }
++
++    // Create the video processor
++    hr = s->videoDevice->lpVtbl->CreateVideoProcessor(s->videoDevice, s->enumerator, 0, &s->processor);
++    if (FAILED(hr)) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to create video processor: HRESULT 0x%lX.\n", hr);
++        return AVERROR_EXTERNAL;
++    }
++    // Call create_texture_pool_and_views to initialize textures and views
++    // int ret = create_texture_pool_and_views(s, ctx);
++    // if (ret < 0) {
++    //     av_log(ctx, AV_LOG_ERROR, "Failed to create texture pool and output views.\n");
++    //     return ret;
++    // }
++
++    // av_log(ctx, AV_LOG_VERBOSE, "D3D11 video processor successfully configured.\n");
++    // return 0;
++    // Create the output texture
++    D3D11_TEXTURE2D_DESC textureDesc = {
++        .Width = s->width,
++        .Height = s->height,
++        .MipLevels = 1,
++        .ArraySize = 1,
++        .Format = DXGI_FORMAT_NV12,
++        .SampleDesc = { .Count = 1 },
++        .Usage = D3D11_USAGE_DEFAULT,
++        .BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER,
++    };
++
++    hr = s->device->lpVtbl->CreateTexture2D(s->device, &textureDesc, NULL, &s->d3d11_vp_output_texture);
++    if (FAILED(hr)) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to create output texture: HRESULT 0x%lX.\n", hr);
++        return AVERROR_EXTERNAL;
++    }
++
++    // Create the output view
++    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = {
++        .ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D,
++        .Texture2D = { .MipSlice = 0 },
++    };
++
++    hr = s->videoDevice->lpVtbl->CreateVideoProcessorOutputView(
++        s->videoDevice, (ID3D11Resource *)s->d3d11_vp_output_texture, s->enumerator, &outputViewDesc, &s->outputView);
++    if (FAILED(hr)) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to create video processor output view: HRESULT 0x%lX.\n", hr);
++        return AVERROR_EXTERNAL;
++    }
++
++    av_log(ctx, AV_LOG_VERBOSE, "D3D11 video processor successfully configured.\n");
++    return 0;
++}
++
++static int d3d11scale_filter_frame(AVFilterLink* inlink, AVFrame* in) 
++{
++    AVFilterContext *ctx = inlink->dst;
++    D3D11ScaleContext *s = ctx->priv;
++    AVFilterLink *outlink = ctx->outputs[0];
++    ID3D11VideoProcessorInputView *inputView = NULL;
++    ID3D11VideoContext *videoContext = NULL;
++    AVFrame *out = NULL;
++    int ret;
++
++    // av_log(ctx, AV_LOG_INFO, "Inside Filter_frame function!\n");
++
++    // Validate input hw_frames_ctx
++    if (!in->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hardware frames context available in input frame.\n");
++        av_frame_free(&in);
++        return AVERROR(EINVAL);
++    }
++// AVHWFramesContext *frames_ctx = (AVHWFramesContext *)hw_frames_ctx->data;
++    // Reference the input hardware frames context
++    AVHWFramesContext *frames_ctx = (AVHWFramesContext *)in->hw_frames_ctx->data;
++    // av_log(ctx, AV_LOG_VERBOSE, "Pool size inside filter frame %d.\n", frames_ctx->initial_pool_size);
++
++    // Validate that the filter's hardware device context has been initialized
++    if (!s->hw_device_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "Filter hardware device context is uninitialized. Ensure config_props has been called.\n");
++        av_frame_free(&in);
++        return AVERROR(EINVAL);
++    }
++
++    // Validate hardware device compatibility
++    AVHWDeviceContext *input_device_ctx = (AVHWDeviceContext *)frames_ctx->device_ref->data;
++    AVHWDeviceContext *filter_device_ctx = (AVHWDeviceContext *)s->hw_device_ctx->data;
++
++    if (input_device_ctx->type != filter_device_ctx->type) {
++        av_log(ctx, AV_LOG_ERROR, "Mismatch between input and filter hardware device types.\n");
++        av_frame_free(&in);
++        return AVERROR(EINVAL);
++    }
++
++    // av_log(ctx, AV_LOG_VERBOSE, "Hardware context validation succeeded.\n");
++
++    // FOR SOME REASON THE BELOW CHECK FAILS, NOT SURE BECAUSE OF WHICH WE ARE FACING MEMORY ISSUES
++    // Verify the device matches the filter's context
++    // if (frames_ctx->device_ref != s->hw_device_ctx) {
++    //     av_log(ctx, AV_LOG_ERROR, "Mismatch between input frame and filter hardware device contexts.\n");
++    //     av_frame_free(&in);
++    //     return AVERROR(EINVAL);
++    // }
++    // int allocated_surfaces = frames_ctx->initial_pool_size;
++    // int used_surfaces = 0;
++
++    // if (frames_ctx->pool) {
++    //     // Use buffer pool ref count as a proxy for usage
++    //     used_surfaces = av_buffer_get_ref_count(frames_ctx->pool);
++    // }
++
++    // av_log(ctx, AV_LOG_VERBOSE, "Current pool usage: %d/%d\n", used_surfaces, allocated_surfaces);
++
++    // // Proceed with filter processing
++    // av_log(ctx, AV_LOG_VERBOSE, "Input and filter contexts share the same hardware device.\n");  
++    
++    // Lock the hardware context for processing
++    AVD3D11VADeviceContext *d3d11_hwctx = (AVD3D11VADeviceContext *)filter_device_ctx->hwctx;
++    d3d11_hwctx->lock(d3d11_hwctx->lock_ctx); 
++    s->inputWidth = in->width;
++    s->inputHeight = in->height;
++
++    // av_log(ctx, AV_LOG_VERBOSE, "Captured input dimensions: %dx%d\n", s->inputWidth, s->inputHeight);
++
++    // Allocate output frame
++    out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
++    if (!out) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to allocate output frame.\n");
++        av_frame_free(&in);
++        return AVERROR(ENOMEM);
++    }
++
++    // Configure the D3D11 video processor
++    if (!s->processor) {
++        if (d3d11scale_configure_processor(s, ctx) < 0) {
++            av_log(ctx, AV_LOG_ERROR, "Failed to configure processor\n");
++            av_frame_free(&in);
++            av_frame_free(&out);
++            return AVERROR_EXTERNAL;
++        }
++    }
++
++    ID3D11Texture2D *d3d11_texture = (ID3D11Texture2D *)in->data[0];
++    int subIdx = (int)(intptr_t)in->data[1];
++
++    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputViewDesc = {
++        .FourCC = DXGI_FORMAT_NV12,
++        .ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D,
++        .Texture2D.ArraySlice = subIdx
++    };
++
++    HRESULT hr = s->videoDevice->lpVtbl->CreateVideoProcessorInputView(
++        s->videoDevice, d3d11_texture, s->enumerator, &inputViewDesc, &inputView);
++    if (FAILED(hr)) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to create input view: HRESULT 0x%lX\n", hr);
++        return AVERROR_EXTERNAL;
++    }
++//  D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = {D3D11_VPOV_DIMENSION_TEXTURE2D};
++//     outputViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2DARRAY;
++//     outputViewDesc.Texture2D.MipSlice = 0;
++
++//     D3D11_TEXTURE2D_DESC opTexDesc = { 0 };
++//     opTexDesc.Width = s->width;
++//     opTexDesc.Height = s->height;
++//     opTexDesc.MipLevels = 1;
++//     opTexDesc.ArraySize = 1;
++//     opTexDesc.Format = DXGI_FORMAT_NV12;
++//     opTexDesc.SampleDesc.Count = 1;
++//     opTexDesc.Usage = D3D11_USAGE_DEFAULT;
++//     opTexDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER;
++//     opTexDesc.MiscFlags = 0;
++
++//     hr = s->device->lpVtbl->CreateTexture2D(s->device, &opTexDesc, NULL, &outputTexture);
++//         if (FAILED(hr)) {
++//         av_log(ctx, AV_LOG_ERROR, "Failed to create Texture2D : HRESULT 0x%lX\n", hr);
++//         return AVERROR_EXTERNAL;
++//     }
++
++//     hr = s->videoDevice->lpVtbl->CreateVideoProcessorOutputView(
++//         s->videoDevice, (ID3D11Resource*)outputTexture, s->enumerator, &outputViewDesc, &outputView);
++//     if (FAILED(hr)) {
++//         av_log(ctx, AV_LOG_ERROR, "Failed to create output view: HRESULT 0x%lX\n", hr);
++//         return AVERROR_EXTERNAL;
++//     }
++
++   D3D11_VIDEO_PROCESSOR_STREAM stream = {
++        .Enable = TRUE,
++        .pInputSurface = inputView,
++        .OutputIndex = 0
++    };
++
++    s->context->lpVtbl->QueryInterface(s->context, &IID_ID3D11VideoContext, (void**)&videoContext);
++
++    hr = videoContext->lpVtbl->VideoProcessorBlt(videoContext, s->processor, s->outputView, 0, 1, &stream);
++    // av_log(ctx, AV_LOG_VERBOSE, "After VideoProcessorBlt function!!!!!!!!\n");
++    if (FAILED(hr)) {
++        av_log(ctx, AV_LOG_ERROR, "VideoProcessorBlt failed: HRESULT 0x%lX\n", hr);
++        av_frame_free(&in);
++        av_frame_free(&out);
++        return AVERROR_EXTERNAL;
++    }
++
++    ret = av_frame_copy_props(out, in);
++    if (ret < 0){
++        av_log(ctx, AV_LOG_ERROR, "Failed to copy frame properties\n");
++        return ret;
++    }
++
++    out->data[0] = (uint8_t *)s->d3d11_vp_output_texture;
++    out->data[1]= (uint8_t *)(intptr_t)0;
++    out->width = s->width;
++    out->height = s->height;
++    out->format = AV_PIX_FMT_D3D11;
++
++    // av_log(ctx, AV_LOG_VERBOSE, "Input dimensions: %dx%d\n", s->inputWidth, s->inputHeight);
++    // av_log(ctx, AV_LOG_VERBOSE, "Output dimensions: %dx%d\n", s->width, s->height);
++    // av_log(ctx, AV_LOG_VERBOSE, "Output pixel format: %s\n", av_get_pix_fmt_name(out->format));
++    av_frame_free(&in);
++    // av_log(ctx, AV_LOG_VERBOSE, "Out Frame format: %s, width: %d, height: %d, data: %p, data1: %p\n", av_get_pix_fmt_name(out->format), out->width, out->height, out->data[0], out->data[1]);
++    // av_log(ctx, AV_LOG_VERBOSE, "Exiting d3d11scale_filter_frame function!!!!!!!!\n");
++    inputView->lpVtbl->Release(inputView);
++    videoContext->lpVtbl->Release(videoContext);
++    d3d11_hwctx->unlock(d3d11_hwctx->lock_ctx);
++
++    av_frame_free(&in);
++    return ff_filter_frame(outlink, out);
++}
++
++static int d3d11scale_config_props(AVFilterLink* outlink) 
++{
++    AVFilterContext *ctx = outlink->src;
++    D3D11ScaleContext *s = ctx->priv;
++    AVFilterLink *inlink = outlink->src->inputs[0];
++    FilterLink *inl = ff_filter_link(inlink);
++    FilterLink *outl = ff_filter_link(outlink);
++
++    // av_log(ctx, AV_LOG_VERBOSE, "Configuring output properties\n");
++
++    // Evaluate output dimensions
++    int ret = ff_scale_eval_dimensions(s, s->w_expr, s->h_expr, inlink, outlink, &s->width, &s->height);
++    if (ret < 0) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to evaluate dimensions.\n");
++        return AVERROR(EINVAL);
++    }
++
++    // av_log(ctx, AV_LOG_VERBOSE, "Evaluated dimensions: width=%d, height=%d\n", s->width, s->height);
++    outlink->w = s->width;
++    outlink->h = s->height;
++
++    // Validate input hw_frames_ctx
++    if (!inl->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "No hw_frames_ctx available on input link.\n");
++        return AVERROR(EINVAL);
++    }
++
++    // Propagate hw_frames_ctx to output
++    outl->hw_frames_ctx = av_buffer_ref(inl->hw_frames_ctx);
++    if (!outl->hw_frames_ctx) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to propagate hw_frames_ctx from input to output.\n");
++        return AVERROR(ENOMEM);
++    }
++
++    // Initialize filter's hardware device context
++    if (!s->hw_device_ctx) {
++        AVHWFramesContext *in_frames_ctx = (AVHWFramesContext *)inl->hw_frames_ctx->data;
++        // in_frames_ctx->initial_pool_size += 6;
++        av_log(ctx, AV_LOG_VERBOSE, "Input frame pool size: %d\n!!!!!", in_frames_ctx->initial_pool_size); // in_frames_ctx->initial_pool_size
++        s->hw_device_ctx = av_buffer_ref(in_frames_ctx->device_ref);
++        if (!s->hw_device_ctx) {
++            av_log(ctx, AV_LOG_ERROR, "Failed to initialize filter hardware device context.\n");
++            return AVERROR(ENOMEM);
++        }
++        av_log(ctx, AV_LOG_VERBOSE, "Filter hardware device context initialized: %p\n", s->hw_device_ctx);
++    }
++
++    // Initialize D3D11 device and context
++    AVHWDeviceContext *hwctx = (AVHWDeviceContext *)s->hw_device_ctx->data;
++    AVD3D11VADeviceContext *d3d11_hwctx = (AVD3D11VADeviceContext *)hwctx->hwctx;
++
++    s->device = (ID3D11Device *)d3d11_hwctx->device;
++    s->context = d3d11_hwctx->device_context;
++
++    if (!s->device || !s->context) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to initialize filter device or context in config_props.\n");
++        return AVERROR(EINVAL);
++    }
++
++    // av_log(ctx, AV_LOG_WARNING, "Filter device initialized: %p, Filter context: %p\n", s->device, s->context);
++    // av_log(ctx, AV_LOG_VERBOSE, "D3D11 output properties configured successfully.\n");
++    return 0;
++}
++
++static void d3d11scale_uninit(AVFilterContext* ctx) {
++    av_log(ctx, AV_LOG_VERBOSE, "Uninitializing D3D11 scale filter\n");
++    D3D11ScaleContext* s = ctx->priv;
++    if (s->outputView) s->outputView->lpVtbl->Release(s->outputView);
++    // if (s->d3d11_vp_output_texture) s->d3d11_vp_output_texture->lpVtbl->Release(s->d3d11_vp_output_texture);
++    if (s->inputView) s->inputView->lpVtbl->Release(s->inputView);
++    // if (s->processor) s->processor->lpVtbl->Release(s->processor);
++    // if (s->enumerator) s->enumerator->lpVtbl->Release(s->enumerator); //If not commented will crash/fail not sure why, can't open output for 100+ frames, bbut works for 10 frames!
++    if (s->context) s->context->lpVtbl->Release(s->context);
++    if (s->device) s->device->lpVtbl->Release(s->device);
++    if (s->videoDevice) s->videoDevice->lpVtbl->Release(s->videoDevice);
++    return;
++}
++
++static const AVFilterPad d3d11scale_inputs[] = {
++    { "default", AVMEDIA_TYPE_VIDEO, .filter_frame = d3d11scale_filter_frame },
++};
++
++static const AVFilterPad d3d11scale_outputs[] = {
++    { "default", AVMEDIA_TYPE_VIDEO, .config_props = d3d11scale_config_props },
++};
++
++#define OFFSET(x) offsetof(D3D11ScaleContext, x)
++#define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
++static const AVOption d3d11scale_options[] = {
++    { "width", "Output video width",
++            OFFSET(w_expr), AV_OPT_TYPE_STRING, {.str = "iw"}, .flags = FLAGS },
++    { "height", "Output video height",
++            OFFSET(h_expr), AV_OPT_TYPE_STRING, {.str = "ih"}, .flags = FLAGS },
++    { NULL }
++};
++
++static const AVClass d3d11scale_class = {
++    .class_name = "d3d11scale",
++    .item_name  = av_default_item_name,
++    .option     = d3d11scale_options,
++    .version    = LIBAVUTIL_VERSION_INT,
++};
++
++const AVFilter ff_vf_scale_d3d11 = {
++    .name      = "scale_d3d11",
++    .description = NULL_IF_CONFIG_SMALL("Scale video using Direct3D11"),
++    .priv_size = sizeof(D3D11ScaleContext),
++    .priv_class = &d3d11scale_class,
++    .init      = d3d11scale_init,
++    .uninit    = d3d11scale_uninit,
++    FILTER_INPUTS(d3d11scale_inputs),
++    FILTER_OUTPUTS(d3d11scale_outputs),
++    FILTER_SINGLE_PIXFMT(AV_PIX_FMT_D3D11),
++    .flags     = AVFILTER_FLAG_SUPPORT_TIMELINE_GENERIC,
++    .flags_internal = FF_FILTER_FLAG_HWFRAME_AWARE,
++};
+\ No newline at end of file
+-- 
+2.34.1
+

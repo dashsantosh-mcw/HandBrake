@@ -1,0 +1,38 @@
+From 8e6f9a77532b9865e4912263e3d0468470ca82f3 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Sun, 22 Dec 2024 12:21:39 -0800
+Subject: [PATCH 4/4] added-decode-logs
+
+---
+ libavcodec/decode.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index 094bf834a7..f3f0886c86 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -1125,6 +1125,7 @@ enum AVPixelFormat avcodec_default_get_format(struct AVCodecContext *avctx,
+ int ff_decode_get_hw_frames_ctx(AVCodecContext *avctx,
+                                 enum AVHWDeviceType dev_type)
+ {
++    printf("INSIDE !!!! ff_decode_get_hw_frames_ctx is called !!!!\n");
+     AVHWDeviceContext *device_ctx;
+     AVHWFramesContext *frames_ctx;
+     int ret;
+@@ -1157,11 +1158,13 @@ int ff_decode_get_hw_frames_ctx(AVCodecContext *avctx,
+ 
+     frames_ctx = (AVHWFramesContext*)avctx->hw_frames_ctx->data;
+ 
++    av_log(avctx, AV_LOG_DEBUG, "In decode.c : Initial pool size: %d\n", frames_ctx->initial_pool_size);
+     if (frames_ctx->initial_pool_size) {
+         // We guarantee 4 base work surfaces. The function above guarantees 1
+         // (the absolute minimum), so add the missing count.
+         frames_ctx->initial_pool_size += 27;
+     }
++    av_log(avctx, AV_LOG_DEBUG, "In decode.c : After adding!! Initial pool size: %d\n", frames_ctx->initial_pool_size);
+ 
+     ret = av_hwframe_ctx_init(avctx->hw_frames_ctx);
+     if (ret < 0) {
+-- 
+2.34.1
+

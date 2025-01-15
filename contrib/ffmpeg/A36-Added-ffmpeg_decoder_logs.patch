@@ -1,0 +1,132 @@
+From 584985d6c1f630a56b77610946a63fc57978cc27 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Tue, 7 Jan 2025 15:28:47 -0800
+Subject: [PATCH] Added ffmpeg_decoder_logs
+
+---
+ libavcodec/decode.c | 88 ++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 87 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index 81bb017e16..ec31aee529 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -403,6 +403,80 @@ static int discard_samples(AVCodecContext *avctx, AVFrame *frame, int64_t *disca
+ 
+     return 0;
+ }
++static int dump_decoded_frame(const AVFrame *frame, const char *filename, int frame_index) {
++    char output_filename[256];
++    snprintf(output_filename, sizeof(output_filename), "%s_frame_%d.raw", filename, frame_index);
++
++    FILE *file = fopen(output_filename, "wb");
++    if (!file) {
++        av_log(NULL, AV_LOG_ERROR, "Failed to open file for writing: %s\n", output_filename);
++        return AVERROR(errno);
++    }
++
++    AVFrame *mapped_frame = NULL;
++
++    // Check if the frame is hardware-accelerated
++if (frame->hw_frames_ctx) {
++    mapped_frame = av_frame_alloc();
++    if (!mapped_frame) {
++        av_log(NULL, AV_LOG_ERROR, "Failed to allocate mapped frame\n");
++        fclose(file);
++        return AVERROR(ENOMEM);
++    }
++
++    if (av_hwframe_transfer_data(mapped_frame, frame, 0) < 0) {
++        av_log(NULL, AV_LOG_ERROR, "Failed to map hardware frame to system memory\n");
++        av_frame_free(&mapped_frame);
++        fclose(file);
++        return AVERROR(EINVAL);
++    }
++
++    av_log(NULL, AV_LOG_INFO, "Successfully mapped hardware frame to system memory\n");
++    frame = mapped_frame;
++}
++
++
++    // Ensure the frame format is supported
++    if (frame->format != AV_PIX_FMT_NV12 && frame->format != AV_PIX_FMT_YUV420P) {
++        av_log(NULL, AV_LOG_ERROR, "Unsupported pixel format for dumping: %d\n", frame->format);
++        if (mapped_frame) {
++            av_frame_free(&mapped_frame);
++        }
++        fclose(file);
++        return AVERROR(EINVAL);
++    }
++
++    // Write the Y plane
++    for (int y = 0; y < frame->height; y++) {
++        fwrite(frame->data[0] + y * frame->linesize[0], 1, frame->width, file);
++    }
++
++    // Write the UV planes
++    if (frame->format == AV_PIX_FMT_NV12 || frame->format == AV_PIX_FMT_YUV420P) {
++        // Write the U plane
++        for (int y = 0; y < frame->height / 2; y++) {
++            fwrite(frame->data[1] + y * frame->linesize[1], 1, frame->width / 2, file);
++        }
++
++        if (frame->format == AV_PIX_FMT_YUV420P) {
++            // Write the V plane
++            for (int y = 0; y < frame->height / 2; y++) {
++                fwrite(frame->data[2] + y * frame->linesize[2], 1, frame->width / 2, file);
++            }
++        }
++    }
++
++    fclose(file);
++    av_log(NULL, AV_LOG_INFO, "Dumped frame to %s\n", output_filename);
++
++    // Free the mapped frame if used
++    if (mapped_frame) {
++        av_frame_free(&mapped_frame);
++    }
++
++    return 0;
++}
++
+ 
+ /*
+  * The core of the receive_frame_wrapper for the decoders implementing
+@@ -647,6 +721,9 @@ int ff_decode_receive_frame_internal(AVCodecContext *avctx, AVFrame *frame)
+     } else
+         ret = decode_simple_receive_frame(avctx, frame);
+ 
++    // static int frame_index = 0;
++    // av_log(avctx, AV_LOG_INFO, "Decoded frame in decode.c\n");
++    // dump_decoded_frame(frame, "decoded_output", frame_index++);
+     if (ret == AVERROR_EOF)
+         avci->draining_done = 1;
+ 
+@@ -747,7 +824,11 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
+             return ret;
+     } else
+         dc->draining_started = 1;
+-
++    if (avpkt)
++    {
++        av_log(avctx, AV_LOG_INFO, "FFMPEG: Packet to decode PTS=%" PRId64 ", DTS=%" PRId64"\n",
++               avpkt->pts, avpkt->dts, avpkt->size);
++    }
+     if (!avci->buffer_frame->buf[0] && !dc->draining_started) {
+         ret = decode_receive_frame_internal(avctx, avci->buffer_frame);
+         if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+@@ -886,6 +967,11 @@ int ff_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+         }
+     }
+ #endif
++    if (ret == 0)
++    {
++        av_log(avctx, AV_LOG_INFO, "FFMPEG: DECODED frame : PTS=%" PRId64 ", width=%d, height=%d, format=%d\n",
++               frame->pts, frame->width, frame->height, frame->format);
++    }
+     return 0;
+ fail:
+     av_frame_unref(frame);
+-- 
+2.34.1
+

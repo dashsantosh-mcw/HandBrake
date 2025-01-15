@@ -1,0 +1,352 @@
+From a158203f42b00fb581181f680a902c38dc994050 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Tue, 17 Dec 2024 22:55:38 -0800
+Subject: [PATCH 3/4] logs
+
+---
+ libavcodec/decode.c          |  15 +++-
+ libavcodec/dxva2.c           |   9 ++-
+ libavcodec/mfenc.c           |   4 +-
+ libavfilter/vf_scale_d3d11.c | 152 +++++++++++++----------------------
+ 4 files changed, 77 insertions(+), 103 deletions(-)
+
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index ef20128b51..094bf834a7 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -731,27 +731,36 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
+     int ret;
+ 
+     if (!avcodec_is_open(avctx) || !av_codec_is_decoder(avctx->codec))
++    {
++        av_log(avctx, AV_LOG_ERROR, "Codec is not open\n");
+         return AVERROR(EINVAL);
++    }
+ 
+     if (dc->draining_started)
+         return AVERROR_EOF;
+ 
+-    if (avpkt && !avpkt->size && avpkt->data)
++    if (avpkt && !avpkt->size && avpkt->data){
++        av_log(avctx, AV_LOG_ERROR, "invalid packet: NULL data, size == 0\n");
+         return AVERROR(EINVAL);
++    }
+ 
+     if (avpkt && (avpkt->data || avpkt->side_data_elems)) {
+         if (!AVPACKET_IS_EMPTY(avci->buffer_pkt))
+             return AVERROR(EAGAIN);
+         ret = av_packet_ref(avci->buffer_pkt, avpkt);
+-        if (ret < 0)
++        if (ret < 0){
++            av_log(avctx, AV_LOG_ERROR, "av_packet_ref failed = %s\n", av_err2str(ret));
+             return ret;
++        }
+     } else
+         dc->draining_started = 1;
+ 
+     if (!avci->buffer_frame->buf[0] && !dc->draining_started) {
+         ret = decode_receive_frame_internal(avctx, avci->buffer_frame);
+-        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
++        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF){
++            av_log(avctx, AV_LOG_ERROR, "decode_receive_frame_internal failed = %s\n", av_err2str(ret));
+             return ret;
++        }
+     }
+ 
+     return 0;
+diff --git a/libavcodec/dxva2.c b/libavcodec/dxva2.c
+index 5bfa23e497..5a9f507f20 100644
+--- a/libavcodec/dxva2.c
++++ b/libavcodec/dxva2.c
+@@ -28,6 +28,8 @@
+ #include "libavutil/log.h"
+ #include "libavutil/mem.h"
+ #include "libavutil/time.h"
++#include "libavutil/pixdesc.h"
++
+ 
+ #include "avcodec.h"
+ #include "decode.h"
+@@ -668,6 +670,7 @@ int ff_dxva2_decode_init(AVCodecContext *avctx)
+ 
+     // (avctx->pix_fmt is not updated yet at this point)
+     sctx->pix_fmt = avctx->hwaccel->pix_fmt;
++    av_log(avctx, AV_LOG_VERBOSE, "Printing the value of sctx->pix_fmt: %d and avctx->hwaccel->pix_fmt: %d\n", sctx->pix_fmt, avctx->hwaccel->pix_fmt);
+ 
+     ret = ff_decode_get_hw_frames_ctx(avctx, dev_type);
+     if (ret < 0)
+@@ -676,6 +679,7 @@ int ff_dxva2_decode_init(AVCodecContext *avctx)
+     frames_ctx = (AVHWFramesContext*)avctx->hw_frames_ctx->data;
+     sctx->device_ctx = frames_ctx->device_ctx;
+ 
++    av_log(avctx, AV_LOG_VERBOSE, "Before failing with error Invalid pixfmt for hwaccel! Printing the value of frames_ctx->format: %s and sctx->pix_fmt: %s\n", av_get_pix_fmt_name(frames_ctx->format), av_get_pix_fmt_name(sctx->pix_fmt));
+     if (frames_ctx->format != sctx->pix_fmt) {
+         av_log(avctx, AV_LOG_ERROR, "Invalid pixfmt for hwaccel!\n");
+         ret = AVERROR(EINVAL);
+@@ -931,8 +935,11 @@ int ff_dxva2_common_end_frame(AVCodecContext *avctx, AVFrame *frame,
+                                                  get_surface(avctx, frame),
+                                                  NULL);
+ #endif
+-        if (hr != E_PENDING || ++runs > 50)
++        if (hr != E_PENDING || ++runs > 1000){
++            av_log(avctx, AV_LOG_ERROR, "Failed to begin frame: 0x%x, runs: %d\n", (unsigned)hr, runs);
+             break;
++        }
++          
+         ff_dxva2_unlock(avctx);
+         av_usleep(2000);
+     } while(1);
+diff --git a/libavcodec/mfenc.c b/libavcodec/mfenc.c
+index 24fc5b881e..458eca96f4 100644
+--- a/libavcodec/mfenc.c
++++ b/libavcodec/mfenc.c
+@@ -348,6 +348,7 @@ static IMFSample *mf_v_avframe_to_sample(AVCodecContext *avctx, const AVFrame *f
+             av_log(avctx, AV_LOG_ERROR, "failed to set manager: %s\n", ff_hr_str(hr));
+         }
+     }
++    // av_log(avctx, AV_LOG_ERROR, "texture found \n");
+ 
+     device_hwctx->lock(device_hwctx->lock_ctx); // Locking hardware context
+         d3d11_texture = (ID3D11Texture2D *)frame->data[0];
+@@ -380,6 +381,7 @@ static IMFSample *mf_v_avframe_to_sample(AVCodecContext *avctx, const AVFrame *f
+     
+ 
+     } else {
++        av_log(avctx, AV_LOG_VERBOSE, "Inside else of mf_v_avframe_to_sample \n");
+         size = av_image_get_buffer_size(avctx->pix_fmt, avctx->width, avctx->height, 1);
+         if (size < 0)
+             return NULL;
+@@ -424,7 +426,7 @@ static IMFSample *mf_avframe_to_sample(AVCodecContext *avctx, const AVFrame *fra
+ {
+     MFContext *c = avctx->priv_data;
+     IMFSample *sample;
+-
++    av_log(avctx, AV_LOG_VERBOSE, "Inside mf_avframe_to_sample \n");
+     if (c->is_audio) {
+         sample = mf_a_avframe_to_sample(avctx, frame);
+     } else {
+diff --git a/libavfilter/vf_scale_d3d11.c b/libavfilter/vf_scale_d3d11.c
+index 1f53f10a5d..f6b9252f03 100644
+--- a/libavfilter/vf_scale_d3d11.c
++++ b/libavfilter/vf_scale_d3d11.c
+@@ -23,61 +23,16 @@ typedef struct D3D11ScaleContext {
+     ID3D11VideoProcessorInputView* inputView;
+     ID3D11Texture2D* d3d11_vp_output_texture;
+     ID3D11VideoDevice* videoDevice;
+-    // ID3D11Texture2D** texturePool;
+-    // ID3D11VideoProcessorOutputView** outputViews; 
+     AVBufferRef* hw_device_ctx;
+     AVCodecContext* hw_frames_ctx;
+     void *priv;
+     int width, height;
+-int inputWidth, inputHeight;
++    int inputWidth, inputHeight;
++    int encoder_requires_software_frame;
+ } D3D11ScaleContext;
+-// Forward declaration
+-// int create_texture_pool_and_views(D3D11ScaleContext *s, AVFilterContext *ctx);
+-
+-// static int d3d11scale_init(AVFilterContext* ctx) {
+-//     av_log(ctx, AV_LOG_VERBOSE, "D3D11 INIT called!!!!!!!!!\n");
+-//     D3D11ScaleContext* s = ctx->priv;
+-//     HRESULT hr;
+-//     s->d3d_dll = LoadLibrary("D3D11.dll");
+-//     if (!s->d3d_dll) {
+-//         av_log(ctx, AV_LOG_ERROR, "Failed to load D3D11.dll\n");
+-//         return AVERROR_EXTERNAL;
+-//     }
+-//     int err = 0;
+-
+-//     if ((err = av_hwdevice_ctx_create(&s->hw_device_ctx, AV_HWDEVICE_TYPE_D3D11VA,
+-//                                       NULL, NULL, 0)) < 0) {
+-//         fprintf(stderr, "Failed to create specified HW device.\n");
+-//         return err;
+-//     }
+-//     av_log(ctx, AV_LOG_INFO, "Filter Device: %p, Context: %p\n", s->device, s->context);
+-//     ctx->hw_device_ctx = av_buffer_ref(s->hw_device_ctx);
+-//     if (!ctx->hw_device_ctx) {
+-//     av_log(ctx, AV_LOG_ERROR, "Failed to create buffer reference for D3D11 hardware device.\n");
+-//     return AVERROR(ENOMEM);
+-//     }
+-//     av_log(ctx, AV_LOG_VERBOSE, "D3D11 device created\n");
+-//     return 0;
+-// }
++
+ static int d3d11scale_init(AVFilterContext* ctx) {
+     D3D11ScaleContext* s = ctx->priv;
+-
+-    // if (!ctx->inputs[0]->hw_frames_ctx) {
+-    //     av_log(ctx, AV_LOG_ERROR, "No hardware frames context provided on input.\n");
+-    //     return AVERROR(EINVAL);
+-    // }
+-
+-    // AVHWFramesContext *frames_ctx = (AVHWFramesContext *)ctx->inputs[0]->hw_frames_ctx->data;
+-    // s->hw_device_ctx = av_buffer_ref(frames_ctx->device_ref);
+-    // if (!s->hw_device_ctx) {
+-    //     av_log(ctx, AV_LOG_ERROR, "Failed to reference hardware device context from input.\n");
+-    //     return AVERROR(ENOMEM);
+-    // }
+-
+-    // AVHWDeviceContext *hwctx = (AVHWDeviceContext *)s->hw_device_ctx->data;
+-    // AVD3D11VADeviceContext *d3d11_hwctx = (AVD3D11VADeviceContext *)hwctx->hwctx;
+-    // s->device = (ID3D11Device *)d3d11_hwctx->device;
+-    // s->context = d3d11_hwctx->device_context;
+     return 0;
+ }
+ 
+@@ -188,7 +143,7 @@ static int d3d11scale_filter_frame(AVFilterLink* inlink, AVFrame* in)
+ // AVHWFramesContext *frames_ctx = (AVHWFramesContext *)hw_frames_ctx->data;
+     // Reference the input hardware frames context
+     AVHWFramesContext *frames_ctx = (AVHWFramesContext *)in->hw_frames_ctx->data;
+-    // av_log(ctx, AV_LOG_VERBOSE, "Pool size inside filter frame %d.\n", frames_ctx->initial_pool_size);
++    av_log(ctx, AV_LOG_VERBOSE, "Pool size inside filter frame %d.\n", frames_ctx->initial_pool_size);
+ 
+     // Validate that the filter's hardware device context has been initialized
+     if (!s->hw_device_ctx) {
+@@ -207,24 +162,6 @@ static int d3d11scale_filter_frame(AVFilterLink* inlink, AVFrame* in)
+         return AVERROR(EINVAL);
+     }
+ 
+-    // av_log(ctx, AV_LOG_VERBOSE, "Hardware context validation succeeded.\n");
+-
+-    // FOR SOME REASON THE BELOW CHECK FAILS, NOT SURE BECAUSE OF WHICH WE ARE FACING MEMORY ISSUES
+-    // Verify the device matches the filter's context
+-    // if (frames_ctx->device_ref != s->hw_device_ctx) {
+-    //     av_log(ctx, AV_LOG_ERROR, "Mismatch between input frame and filter hardware device contexts.\n");
+-    //     av_frame_free(&in);
+-    //     return AVERROR(EINVAL);
+-    // }
+-    // int allocated_surfaces = frames_ctx->initial_pool_size;
+-    // int used_surfaces = 0;
+-
+-    // if (frames_ctx->pool) {
+-    //     // Use buffer pool ref count as a proxy for usage
+-    //     used_surfaces = av_buffer_get_ref_count(frames_ctx->pool);
+-    // }
+-
+-    // av_log(ctx, AV_LOG_VERBOSE, "Current pool usage: %d/%d\n", used_surfaces, allocated_surfaces);
+ 
+     // // Proceed with filter processing
+     // av_log(ctx, AV_LOG_VERBOSE, "Input and filter contexts share the same hardware device.\n");  
+@@ -270,33 +207,7 @@ static int d3d11scale_filter_frame(AVFilterLink* inlink, AVFrame* in)
+         av_log(ctx, AV_LOG_ERROR, "Failed to create input view: HRESULT 0x%lX\n", hr);
+         return AVERROR_EXTERNAL;
+     }
+-//  D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC outputViewDesc = {D3D11_VPOV_DIMENSION_TEXTURE2D};
+-//     outputViewDesc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2DARRAY;
+-//     outputViewDesc.Texture2D.MipSlice = 0;
+-
+-//     D3D11_TEXTURE2D_DESC opTexDesc = { 0 };
+-//     opTexDesc.Width = s->width;
+-//     opTexDesc.Height = s->height;
+-//     opTexDesc.MipLevels = 1;
+-//     opTexDesc.ArraySize = 1;
+-//     opTexDesc.Format = DXGI_FORMAT_NV12;
+-//     opTexDesc.SampleDesc.Count = 1;
+-//     opTexDesc.Usage = D3D11_USAGE_DEFAULT;
+-//     opTexDesc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_VIDEO_ENCODER;
+-//     opTexDesc.MiscFlags = 0;
+-
+-//     hr = s->device->lpVtbl->CreateTexture2D(s->device, &opTexDesc, NULL, &outputTexture);
+-//         if (FAILED(hr)) {
+-//         av_log(ctx, AV_LOG_ERROR, "Failed to create Texture2D : HRESULT 0x%lX\n", hr);
+-//         return AVERROR_EXTERNAL;
+-//     }
+-
+-//     hr = s->videoDevice->lpVtbl->CreateVideoProcessorOutputView(
+-//         s->videoDevice, (ID3D11Resource*)outputTexture, s->enumerator, &outputViewDesc, &outputView);
+-//     if (FAILED(hr)) {
+-//         av_log(ctx, AV_LOG_ERROR, "Failed to create output view: HRESULT 0x%lX\n", hr);
+-//         return AVERROR_EXTERNAL;
+-//     }
++
+ 
+    D3D11_VIDEO_PROCESSOR_STREAM stream = {
+         .Enable = TRUE,
+@@ -314,7 +225,51 @@ static int d3d11scale_filter_frame(AVFilterLink* inlink, AVFrame* in)
+         av_frame_free(&out);
+         return AVERROR_EXTERNAL;
+     }
++    s->encoder_requires_software_frame = 0;
++    av_log(ctx, AV_LOG_VERBOSE, "After VideoProcessorBlt function the format is %s\n", av_get_pix_fmt_name(outlink->format));
++    // outl->format != AV_PIX_FMT_D3D11
++if (s->encoder_requires_software_frame) {
++    AVFrame *sw_frame = av_frame_alloc();
++    if (!sw_frame) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to allocate software frame.\n");
++        av_frame_free(&in);
++        av_frame_free(&out);
++        return AVERROR(ENOMEM);
++    }
++
++    sw_frame->format = AV_PIX_FMT_NV12;
++    sw_frame->width = outlink->w;
++    sw_frame->height = outlink->h;
++
++    // ret = av_frame_get_buffer(sw_frame, 32);
++    // if (ret < 0) {
++    //     av_log(ctx, AV_LOG_ERROR, "Failed to allocate buffer for software frame: %s\n", av_err2str(ret));
++    //     av_frame_free(&sw_frame);
++    //     av_frame_free(&in);
++    //     av_frame_free(&out);
++    //     return ret;
++    // }
++    // sw_frame->pts = out->pts;
++    // sw_frame->pkt_dts = out->pkt_dts;
++    // sw_frame->time_base = out->time_base;
++
++
++    ret = av_hwframe_transfer_data(sw_frame, out, 0);
++    if (ret < 0) {
++        av_log(ctx, AV_LOG_ERROR, "Failed to transfer data to software frame: %s\n", av_err2str(ret));
++        av_frame_free(&sw_frame);
++        av_frame_free(&in);
++        av_frame_free(&out);
++        return ret;
++    }
+ 
++    av_frame_free(&in);
++    inputView->lpVtbl->Release(inputView);
++    videoContext->lpVtbl->Release(videoContext);
++    d3d11_hwctx->unlock(d3d11_hwctx->lock_ctx);
++    return ff_filter_frame(outlink, sw_frame);
++}
++    else {
+     ret = av_frame_copy_props(out, in);
+     if (ret < 0){
+         av_log(ctx, AV_LOG_ERROR, "Failed to copy frame properties\n");
+@@ -325,18 +280,19 @@ static int d3d11scale_filter_frame(AVFilterLink* inlink, AVFrame* in)
+     out->data[1]= (uint8_t *)(intptr_t)0;
+     out->width = s->width;
+     out->height = s->height;
+-    out->format = AV_PIX_FMT_D3D11;
++    out->format = AV_PIX_FMT_D3D11; 
++    }
++
+ 
+     // av_log(ctx, AV_LOG_VERBOSE, "Input dimensions: %dx%d\n", s->inputWidth, s->inputHeight);
+     // av_log(ctx, AV_LOG_VERBOSE, "Output dimensions: %dx%d\n", s->width, s->height);
+     // av_log(ctx, AV_LOG_VERBOSE, "Output pixel format: %s\n", av_get_pix_fmt_name(out->format));
+-    av_frame_free(&in);
++    // av_frame_free(&in);
+     // av_log(ctx, AV_LOG_VERBOSE, "Out Frame format: %s, width: %d, height: %d, data: %p, data1: %p\n", av_get_pix_fmt_name(out->format), out->width, out->height, out->data[0], out->data[1]);
+     // av_log(ctx, AV_LOG_VERBOSE, "Exiting d3d11scale_filter_frame function!!!!!!!!\n");
+     inputView->lpVtbl->Release(inputView);
+     videoContext->lpVtbl->Release(videoContext);
+     d3d11_hwctx->unlock(d3d11_hwctx->lock_ctx);
+-
+     av_frame_free(&in);
+     return ff_filter_frame(outlink, out);
+ }
+@@ -406,7 +362,7 @@ static int d3d11scale_config_props(AVFilterLink* outlink)
+ }
+ 
+ static void d3d11scale_uninit(AVFilterContext* ctx) {
+-    av_log(ctx, AV_LOG_VERBOSE, "Uninitializing D3D11 scale filter\n");
++
+     D3D11ScaleContext* s = ctx->priv;
+     if (s->outputView) s->outputView->lpVtbl->Release(s->outputView);
+     // if (s->d3d11_vp_output_texture) s->d3d11_vp_output_texture->lpVtbl->Release(s->d3d11_vp_output_texture);
+-- 
+2.34.1
+

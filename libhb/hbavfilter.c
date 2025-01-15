@@ -124,7 +124,7 @@ hb_avfilter_graph_init(hb_value_t * settings, hb_filter_init_t * init)
 #endif
     {
         enum AVPixelFormat pix_fmt = init->pix_fmt;
-        if (init->hw_pix_fmt == AV_PIX_FMT_CUDA)
+        if (init->hw_pix_fmt == AV_PIX_FMT_CUDA || init->hw_pix_fmt == AV_PIX_FMT_D3D11)
         {
             par = av_buffersrc_parameters_alloc();
             par->format = init->hw_pix_fmt;

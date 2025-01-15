@@ -1,0 +1,69 @@
+From fe48c8711851fbd4d7b8f09cf73024578053a9d1 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Wed, 27 Nov 2024 09:03:11 -0800
+Subject: [PATCH 2/4] fix pool size
+
+---
+ libavcodec/decode.c | 7 +++++--
+ libavcodec/dxva2.c  | 2 +-
+ 2 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index c331bb8596..ef20128b51 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -1148,11 +1148,10 @@ int ff_decode_get_hw_frames_ctx(AVCodecContext *avctx,
+ 
+     frames_ctx = (AVHWFramesContext*)avctx->hw_frames_ctx->data;
+ 
+-
+     if (frames_ctx->initial_pool_size) {
+         // We guarantee 4 base work surfaces. The function above guarantees 1
+         // (the absolute minimum), so add the missing count.
+-        frames_ctx->initial_pool_size += 3;
++        frames_ctx->initial_pool_size += 27;
+     }
+ 
+     ret = av_hwframe_ctx_init(avctx->hw_frames_ctx);
+@@ -1225,6 +1224,7 @@ int avcodec_get_hw_frames_parameters(AVCodecContext *avctx,
+ static int hwaccel_init(AVCodecContext *avctx,
+                         const FFHWAccel *hwaccel)
+ {
++    printf("INSIDE !!!! hwaccel_init is called !!!!\n");
+     int err;
+ 
+     if (hwaccel->p.capabilities & AV_HWACCEL_CODEC_CAP_EXPERIMENTAL &&
+@@ -1243,7 +1243,9 @@ static int hwaccel_init(AVCodecContext *avctx,
+ 
+     avctx->hwaccel = &hwaccel->p;
+     if (hwaccel->init) {
++        printf("Before hwaccel->init is called !!!!\n");
+         err = hwaccel->init(avctx);
++        printf("hwaccel->init is called !!!!\n");
+         if (err < 0) {
+             av_log(avctx, AV_LOG_ERROR, "Failed setup for format %s: "
+                    "hwaccel initialisation returned error.\n",
+@@ -1271,6 +1273,7 @@ void ff_hwaccel_uninit(AVCodecContext *avctx)
+ 
+ int ff_get_format(AVCodecContext *avctx, const enum AVPixelFormat *fmt)
+ {
++    printf("INSIDE !!!! ff_get_format is called !!!!\n");
+     const AVPixFmtDescriptor *desc;
+     enum AVPixelFormat *choices;
+     enum AVPixelFormat ret, user_choice;
+diff --git a/libavcodec/dxva2.c b/libavcodec/dxva2.c
+index 193e4d2c29..5bfa23e497 100644
+--- a/libavcodec/dxva2.c
++++ b/libavcodec/dxva2.c
+@@ -631,7 +631,7 @@ int ff_dxva2_common_frame_params(AVCodecContext *avctx,
+                             AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
+     frames_ctx->width = FFALIGN(avctx->coded_width, surface_alignment);
+     frames_ctx->height = FFALIGN(avctx->coded_height, surface_alignment);
+-    frames_ctx->initial_pool_size = 20;
++    frames_ctx->initial_pool_size = num_surfaces;
+ 
+ 
+ #if CONFIG_DXVA2
+-- 
+2.34.1
+

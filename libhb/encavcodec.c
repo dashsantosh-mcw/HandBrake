@@ -1108,6 +1108,7 @@ static void Encode( hb_work_object_t *w, hb_buffer_t **buf_in,
     }
 
     // Encode
+    // hb_log("HANDBRAKE: SENDING FRAME TO ENCODE!, PTS=%" PRId64 "\n", frame.pts);
     ret = avcodec_send_frame(pv->context, &frame);
     av_frame_unref(&frame);
 
@@ -1152,6 +1153,7 @@ static void Flush( hb_work_object_t * w, hb_buffer_list_t * list )
 int encavcodecWork( hb_work_object_t * w, hb_buffer_t ** buf_in,
                     hb_buffer_t ** buf_out )
 {
+    // hb_log("encavcodec.c: Inside encavcodecWork function!!\n");
     hb_work_private_t * pv = w->private_data;
     hb_buffer_t       * in = *buf_in;
     hb_buffer_list_t    list;

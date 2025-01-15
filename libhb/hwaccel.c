@@ -10,6 +10,7 @@
 #include "handbrake/hbffmpeg.h"
 #include "handbrake/handbrake.h"
 #include "handbrake/nvenc_common.h"
+#include "libavutil/hwcontext_d3d11va.h"
 
 #ifdef __APPLE__
 #include "platform/macosx/vt_common.h"
@@ -171,6 +172,10 @@ AVBufferRef *hb_hwaccel_init_hw_frames_ctx(AVBufferRef *hw_device_ctx,
     frames_ctx->sw_format = sw_fmt;
     frames_ctx->width = width;
     frames_ctx->height = height;
+    // frames_ctx->initial_pool_size = 27;
+    AVD3D11VAFramesContext *frames_hwctx = frames_ctx->hwctx;
+        frames_hwctx->BindFlags |= D3D11_BIND_DECODER;
+        frames_hwctx->BindFlags |= D3D11_BIND_VIDEO_ENCODER;
     if (0 != av_hwframe_ctx_init(hw_frames_ctx))
     {
         hb_error("hwaccel: failed to initialize hw frames context");
@@ -263,6 +268,7 @@ static int is_encoder_supported(int encoder_id)
         case HB_VCODEC_VT_H265_10BIT:
         case HB_VCODEC_FFMPEG_MF_H264:
         case HB_VCODEC_FFMPEG_MF_H265:
+        // case HB_VCODEC_FFMPEG_MF_AV1:
             return 1;
         default:
             return 0;

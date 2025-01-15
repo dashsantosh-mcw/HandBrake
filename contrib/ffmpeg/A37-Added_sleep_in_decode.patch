@@ -1,0 +1,46 @@
+From 8b03c857a41b3c47fa36504f0277b2f24d5843a0 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Fri, 10 Jan 2025 12:52:23 -0800
+Subject: [PATCH] Added_sleep_in_decode
+
+---
+ libavcodec/decode.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index ec31aee529..9955158a98 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -830,6 +830,7 @@ int attribute_align_arg avcodec_send_packet(AVCodecContext *avctx, const AVPacke
+                avpkt->pts, avpkt->dts, avpkt->size);
+     }
+     if (!avci->buffer_frame->buf[0] && !dc->draining_started) {
++        //av_usleep(0);
+         ret = decode_receive_frame_internal(avctx, avci->buffer_frame);
+         if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
+             return ret;
+@@ -968,10 +969,19 @@ int ff_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame)
+     }
+ #endif
+     if (ret == 0)
+-    {
+-        av_log(avctx, AV_LOG_INFO, "FFMPEG: DECODED frame : PTS=%" PRId64 ", width=%d, height=%d, format=%d\n",
++if (ret == 0) {
++    // Check if the frame is valid (width > 0, height > 0, and format is not PIX_FMT_NONE)
++    if (frame->width > 0 && frame->height > 0 && frame->format != AV_PIX_FMT_NONE) {
++        av_log(avctx, AV_LOG_VERBOSE, 
++               "FFMPEG: VALID DECODED frame : PTS=%" PRId64 ", width=%d, height=%d, format=%d\n",
+                frame->pts, frame->width, frame->height, frame->format);
++    } else {
++        // av_log(avctx, AV_LOG_WARNING, 
++        //        "FFMPEG: SKIPPING INVALID frame : PTS=%" PRId64 ", width=%d, height=%d, format=%d\n",
++        //        frame->pts, frame->width, frame->height, frame->format);
+     }
++}
++
+     return 0;
+ fail:
+     av_frame_unref(frame);
+-- 
+2.34.1
+

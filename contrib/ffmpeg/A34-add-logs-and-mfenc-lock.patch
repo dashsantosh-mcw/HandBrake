@@ -1,0 +1,108 @@
+From 8e6cacc4b60c487550a6e83b613f792fd58c1b66 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Sun, 29 Dec 2024 19:56:36 -0800
+Subject: [PATCH 1/2] add logs and mfenc lock
+
+---
+ libavcodec/dxva2.c |  5 +++--
+ libavcodec/mfenc.c | 18 +++++++++---------
+ 2 files changed, 12 insertions(+), 11 deletions(-)
+
+diff --git a/libavcodec/dxva2.c b/libavcodec/dxva2.c
+index 7a8b3b850e..29f65f3677 100644
+--- a/libavcodec/dxva2.c
++++ b/libavcodec/dxva2.c
+@@ -619,8 +619,9 @@ int ff_dxva2_common_frame_params(AVCodecContext *avctx,
+         surface_alignment = 16;
+ 
+     /* 1 base work surface */
++    av_log(avctx, AV_LOG_VERBOSE, "Count of surfaces: %d\n", num_surfaces);
+     num_surfaces = 1;
+-
++    av_log(avctx, AV_LOG_VERBOSE, "Count of surfaces after base: %d\n", num_surfaces);
+     /* add surfaces based on number of possible refs */
+     if (avctx->codec_id == AV_CODEC_ID_H264 || avctx->codec_id == AV_CODEC_ID_HEVC)
+         num_surfaces += 16;
+@@ -628,7 +629,7 @@ int ff_dxva2_common_frame_params(AVCodecContext *avctx,
+         num_surfaces += 8;
+     else
+         num_surfaces += 2;
+-
++    av_log(avctx, AV_LOG_VERBOSE, "Count of surfaces after adding based on codec: %d\n", num_surfaces);
+     frames_ctx->sw_format = avctx->sw_pix_fmt == AV_PIX_FMT_YUV420P10 ?
+                             AV_PIX_FMT_P010 : AV_PIX_FMT_NV12;
+     frames_ctx->width = FFALIGN(avctx->coded_width, surface_alignment);
+diff --git a/libavcodec/mfenc.c b/libavcodec/mfenc.c
+index 458eca96f4..85fa2942b1 100644
+--- a/libavcodec/mfenc.c
++++ b/libavcodec/mfenc.c
+@@ -44,7 +44,7 @@ typedef struct MFContext {
+     ID3D11DeviceContext* d3d_context;
+     IMFDXGIDeviceManager *dxgiManager;
+     int resetToken;
+-   
++    AVD3D11VADeviceContext* device_hwctx;
+     MFFunctions functions;
+     AVFrame *frame;
+     int is_video, is_audio;
+@@ -329,16 +329,17 @@ static IMFSample *mf_v_avframe_to_sample(AVCodecContext *avctx, const AVFrame *f
+  
+     MFFunctions *func = &c->functions;
+     AVHWFramesContext* frames_ctx = NULL; 
+-    AVD3D11VADeviceContext* device_hwctx = NULL;
++   
+ 
+     if (frame->format == AV_PIX_FMT_D3D11) {
+     frames_ctx = (AVHWFramesContext*)frame->hw_frames_ctx->data; 
+-    device_hwctx = (AVD3D11VADeviceContext*)frames_ctx->device_ctx->hwctx;
++    c->device_hwctx = (AVD3D11VADeviceContext*)frames_ctx->device_ctx->hwctx;
++    
+ 
+     if(!c->dxgiManager){
+         hr = func->MFCreateDXGIDeviceManager(&c->resetToken, &c->dxgiManager);
+         if (SUCCEEDED(hr)) {
+-            hr = IMFDXGIDeviceManager_ResetDevice(c->dxgiManager, device_hwctx->device, c->resetToken);
++            hr = IMFDXGIDeviceManager_ResetDevice(c->dxgiManager, c->device_hwctx->device, c->resetToken);
+             if (FAILED(hr)) {
+                 av_log(avctx, AV_LOG_ERROR, "failed to reset device: %s\n", ff_hr_str(hr));
+             }
+@@ -350,7 +351,6 @@ static IMFSample *mf_v_avframe_to_sample(AVCodecContext *avctx, const AVFrame *f
+     }
+     // av_log(avctx, AV_LOG_ERROR, "texture found \n");
+ 
+-    device_hwctx->lock(device_hwctx->lock_ctx); // Locking hardware context
+         d3d11_texture = (ID3D11Texture2D *)frame->data[0];
+         subIdx = (int)(intptr_t)frame->data[1];
+         if (!d3d11_texture)
+@@ -417,8 +417,6 @@ static IMFSample *mf_v_avframe_to_sample(AVCodecContext *avctx, const AVFrame *f
+     IMFSample_SetSampleTime(sample, mf_to_mf_time(avctx, frame->pts));
+     IMFSample_SetSampleDuration(sample, mf_to_mf_time(avctx, frame->duration));
+   
+-    if(device_hwctx)
+-        device_hwctx->unlock(device_hwctx->lock_ctx);
+     return sample;
+ }
+ 
+@@ -571,7 +569,9 @@ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+         if (ret < 0 && ret != AVERROR_EOF)
+             return ret;
+     }
+-
++    if(c->device_hwctx){
++        c->device_hwctx->lock(c->device_hwctx->lock_ctx); 
++    }
+     if (c->frame->buf[0]) {
+         sample = mf_avframe_to_sample(avctx, c->frame);
+         if (!sample) {
+@@ -615,7 +615,7 @@ static int mf_receive_packet(AVCodecContext *avctx, AVPacket *avpkt)
+ 
+     ret = mf_sample_to_avpacket(avctx, sample, avpkt);
+     IMFSample_Release(sample);
+-
++    c->device_hwctx->unlock(c->device_hwctx->lock_ctx); 
+     return ret;
+ }
+ 
+-- 
+2.34.1
+

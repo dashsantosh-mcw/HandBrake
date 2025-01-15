@@ -39,6 +39,7 @@
     VC1 decoder) can't easily be used by the HB mpeg stream reader.
  */
 
+#include "pthread.h"
 #include "handbrake/handbrake.h"
 #include "handbrake/hbffmpeg.h"
 #include "handbrake/hbavfilter.h"
@@ -145,6 +146,7 @@ struct hb_work_private_s
     hb_audio_resample_t  * resample;
     int                    drop_samples;
     uint64_t               downmix_mask;
+    // pthread_mutex_t decoder_mutex;
 
 #if HB_PROJECT_FEATURE_QSV
     // QSV-specific settings
@@ -381,6 +383,7 @@ static int decavcodecaInit( hb_work_object_t * w, hb_job_t * job )
 
     codec       = avcodec_find_decoder(w->codec_param);
     pv->context = avcodec_alloc_context3(codec);
+    // pv->context->hw_device_ctx
 
     if (pv->title->opaque_priv != NULL)
     {
@@ -1469,6 +1472,17 @@ int reinit_video_filters(hb_work_private_t * pv)
         }
         else
 #endif
+// if (pv->frame->hw_frames_ctx && hw_pix_fmt == AV_PIX_FMT_D3D11) {
+//     settings = hb_dict_init();
+
+//     hb_dict_set(settings, "width", hb_value_int(orig_width));
+//     hb_dict_set(settings, "height", hb_value_int(orig_height));
+//     hb_dict_set(settings, "format", hb_value_string(av_get_pix_fmt_name(sw_pix_fmt))); // Target format
+//     hb_avfilter_append_dict(filters, "scale_d3d11", settings);
+
+//     hb_log("Added scale_d3d11 filter for hardware scaling.");
+// }
+
         if (pv->frame->hw_frames_ctx && pv->job->hw_pix_fmt == AV_PIX_FMT_CUDA)
         {
             if (color_range != pv->frame->color_range)
@@ -1591,9 +1605,12 @@ int reinit_video_filters(hb_work_private_t * pv)
         frames_ctx = (AVHWFramesContext *)pv->frame->hw_frames_ctx->data;
         sw_pix_fmt = frames_ctx->sw_format;
         hw_pix_fmt = frames_ctx->format;
+        // hb_log("hwctx found: hw_frames_ctx sw_pix_fmt=%s hw_pix_fmt=%s", av_get_pix_fmt_name(sw_pix_fmt), av_get_pix_fmt_name(hw_pix_fmt));
     }
 
     memset((void*)&filter_init, 0, sizeof(filter_init));
+    // hb_log("reinit_video_filters: creating filter graph");
+    // hb_log("reinit_video_filters: sw_pix_fmt=%s hw_pix_fmt=%s", av_get_pix_fmt_name(sw_pix_fmt), av_get_pix_fmt_name(hw_pix_fmt));
 
     filter_init.job               = pv->job;
     filter_init.pix_fmt           = sw_pix_fmt;
@@ -1703,19 +1720,24 @@ static void filter_video(hb_work_private_t *pv)
 static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 {
     int got_picture = 0, oldlevel = 0, ret;
+    static int decoded_frame_count = 0;
     AVPacket *avp = pv->pkt;
     reordered_data_t * reordered;
     AVFrame *recv_frame = pv->frame;
 
     if (pv->hw_frame)
     {
+        // hb_log("decodeFrame: hw_frame=%p", pv->hw_frame);
         recv_frame = pv->hw_frame;
+    }
+    else {
+        // hb_log("decodeFrame fallback to sw frame: recv_frame=%p", recv_frame);
     }
 
     if ( global_verbosity_level <= 1 )
     {
         oldlevel = av_log_get_level();
-        av_log_set_level( AV_LOG_QUIET );
+        av_log_set_level( AV_LOG_VERBOSE );
     }
 
     if (packet_info != NULL)
@@ -1771,51 +1793,82 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     do
     {
         ret = avcodec_receive_frame(pv->context, recv_frame);
-        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
-        {
+
+        if (ret >= 0) {
+            hb_log("HANDBRAKE: Decoded frame with PTS = %" PRId64, recv_frame->pts);
+            // hb_log("recv_frame props: format=%d, width=%d, height=%d, hw_frames_ctx=%p, pts=%" PRId64,
+                // recv_frame->format, recv_frame->width, recv_frame->height, recv_frame->hw_frames_ctx, recv_frame->pts);
+
+        // Check for hardware decoding
+        // if (recv_frame->hw_frames_ctx) {
+        //     AVHWFramesContext *hw_frames_ctx = (AVHWFramesContext *)recv_frame->hw_frames_ctx->data;
+
+        //     // Log that this frame was decoded using hardware
+        //     // hb_log("Frame decoded using hardware acceleration. Buffer Pool Size: %d\n",
+        //         hw_frames_ctx->initial_pool_size);
+        // } else {
+        //     // Log that this frame was decoded using software
+        //     // hb_log("Frame decoded using software fallback.\n");
+        // }
+            // Increment the frame counter
+            // decoded_frame_count++;
+
+            // // Add a delay if 40 frames have been decoded
+            // if (decoded_frame_count >=63) {
+                hb_log("63 frames decoded");// Reset the counter
+            // }
+        }
+
+        if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
             ++pv->decode_errors;
         }
-        if (ret < 0)
-        {
+
+        if (ret < 0) {
             break;
         }
-        got_picture = 1;
 
-        if (pv->hw_frame)
-        {
-            if (pv->hw_frame->hw_frames_ctx)
-            {
+        got_picture = 1;
+        // hb_log("is hwFrame = %d", pv->hw_frame != NULL);
+
+        if (pv->hw_frame) {
+            if (pv->hw_frame->hw_frames_ctx) {
+                // Hardware frame transfer
                 ret = av_hwframe_transfer_data(pv->frame, pv->hw_frame, 0);
                 av_frame_copy_props(pv->frame, pv->hw_frame);
                 av_frame_unref(pv->hw_frame);
-                if (ret < 0)
-                {
+
+                if (ret < 0) {
                     hb_error("decavcodec: error transferring data to system memory");
                     break;
                 }
-            }
-            else
-            {
-                // HWAccel falled back to the software decoder
+
+                // hb_log("decavcodec: av_hwframe_transfer_data frame->format=%s",
+                    // av_get_pix_fmt_name(pv->frame->format));
+                // hb_log("decavcodec: av_hwframe_transfer_data hw_frame->format=%s",
+                    // av_get_pix_fmt_name(pv->hw_frame->format));
+            } else {
+                // Fallback to software decoding
+                // hb_log("Fallback to software frame decoding.");
                 av_frame_ref(pv->frame, pv->hw_frame);
                 av_frame_unref(pv->hw_frame);
-                if (ret < 0)
-                {
+
+                if (ret < 0) {
                     hb_error("decavcodec: error hwaccel copying frame");
                 }
             }
         }
 
-        // recompute the frame/field duration, because sometimes it changes
-        compute_frame_duration( pv );
+        // Recompute frame duration
+        compute_frame_duration(pv);
         filter_video(pv);
     } while (ret >= 0);
 
+
     if ( global_verbosity_level <= 1 )
     {
-        av_log_set_level( oldlevel );
+        // av_log_set_level( oldlevel );
     }
-
+    // hb_log("decavcodec: got_picture=%d", got_picture);
     return got_picture;
 }
 
@@ -1892,6 +1945,7 @@ static int decavcodecvInit( hb_work_object_t * w, hb_job_t * job )
     if( pv->job && pv->job->title && !pv->job->title->has_resolution_change )
     {
         pv->threads = HB_FFMPEG_THREADS_AUTO;
+        // hb_log( "decavcodecvInit: threads = %d", pv->threads);
     }
 
 #if HB_PROJECT_FEATURE_QSV

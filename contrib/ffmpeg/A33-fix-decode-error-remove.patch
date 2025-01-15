@@ -1,0 +1,86 @@
+From eef3d91d9e67cf407560b0259fd8c0c7c08fa7d0 Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Sun, 22 Dec 2024 22:25:04 -0800
+Subject: [PATCH] fix: decode error remove
+
+---
+ libavcodec/decode.c | 16 ++++++++++++----
+ libavcodec/dxva2.c  |  3 +--
+ 2 files changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index f3f0886c86..0141b7a5a6 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -1134,7 +1134,10 @@ int ff_decode_get_hw_frames_ctx(AVCodecContext *avctx,
+         return AVERROR(ENOSYS);
+ 
+     if (avctx->hw_frames_ctx)
+-        return 0;
++    {
++       printf("INSIDE !!!! avctx->hw_frames_ctx is not NULL !!!!\n");
++       return 0;
++    }
+     if (!avctx->hw_device_ctx) {
+         av_log(avctx, AV_LOG_ERROR, "A hardware frames or device context is "
+                 "required for hardware accelerated decoding.\n");
+@@ -1154,17 +1157,20 @@ int ff_decode_get_hw_frames_ctx(AVCodecContext *avctx,
+                                            avctx->hwaccel->pix_fmt,
+                                            &avctx->hw_frames_ctx);
+     if (ret < 0)
++    {
++        av_log(avctx, AV_LOG_ERROR, "INSIDE !!!! avcodec_get_hw_frames_parameters is failed !!!!\n");
+         return ret;
++    }
+ 
+     frames_ctx = (AVHWFramesContext*)avctx->hw_frames_ctx->data;
+ 
+-    av_log(avctx, AV_LOG_DEBUG, "In decode.c : Initial pool size: %d\n", frames_ctx->initial_pool_size);
++    av_log(avctx, AV_LOG_VERBOSE, "In decode.c : Initial pool size: %d\n", frames_ctx->initial_pool_size);
+     if (frames_ctx->initial_pool_size) {
+         // We guarantee 4 base work surfaces. The function above guarantees 1
+         // (the absolute minimum), so add the missing count.
+         frames_ctx->initial_pool_size += 27;
+     }
+-    av_log(avctx, AV_LOG_DEBUG, "In decode.c : After adding!! Initial pool size: %d\n", frames_ctx->initial_pool_size);
++    av_log(avctx, AV_LOG_VERBOSE, "In decode.c : After adding!! Initial pool size: %d\n", frames_ctx->initial_pool_size);
+ 
+     ret = av_hwframe_ctx_init(avctx->hw_frames_ctx);
+     if (ret < 0) {
+@@ -1209,7 +1215,7 @@ int avcodec_get_hw_frames_parameters(AVCodecContext *avctx,
+             return AVERROR(ENOMEM);
+         }
+     }
+-
++    av_log(avctx, AV_LOG_VERBOSE, "In decode.c :, Function: avcodec_get_hw_frames_parameters - avctx->thread_count: %d\n", avctx->thread_count);
+     ret = hwa->frame_params(avctx, frames_ref);
+     if (ret >= 0) {
+         AVHWFramesContext *frames_ctx = (AVHWFramesContext*)frames_ref->data;
+@@ -1222,8 +1228,10 @@ int avcodec_get_hw_frames_parameters(AVCodecContext *avctx,
+ 
+             // If frame threading is enabled then an extra surface per thread
+             // is also required.
++            av_log(avctx, AV_LOG_VERBOSE, "In decode.c :, Function: avcodec_get_hw_frames_parameters - Initial pool size: %d\n", frames_ctx->initial_pool_size);
+             if (avctx->active_thread_type & FF_THREAD_FRAME)
+                 frames_ctx->initial_pool_size += avctx->thread_count;
++             av_log(avctx, AV_LOG_VERBOSE, "In decode.c :, Function: avcodec_get_hw_frames_parameters, After adding thread count -%d, Initial pool size: %d\n", avctx->thread_count,frames_ctx->initial_pool_size);
+         }
+ 
+         *out_frames_ref = frames_ref;
+diff --git a/libavcodec/dxva2.c b/libavcodec/dxva2.c
+index 5a9f507f20..7a8b3b850e 100644
+--- a/libavcodec/dxva2.c
++++ b/libavcodec/dxva2.c
+@@ -935,8 +935,7 @@ int ff_dxva2_common_end_frame(AVCodecContext *avctx, AVFrame *frame,
+                                                  get_surface(avctx, frame),
+                                                  NULL);
+ #endif
+-        if (hr != E_PENDING || ++runs > 1000){
+-            av_log(avctx, AV_LOG_ERROR, "Failed to begin frame: 0x%x, runs: %d\n", (unsigned)hr, runs);
++        if (hr != E_PENDING || ++runs > 50){
+             break;
+         }
+           
+-- 
+2.34.1
+
