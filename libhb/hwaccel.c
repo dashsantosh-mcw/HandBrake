@@ -11,6 +11,7 @@
 #include "handbrake/handbrake.h"
 #include "handbrake/nvenc_common.h"
 #include "libavutil/hwcontext_d3d11va.h"
+#include "handbrake/mf_common.h"
 
 #ifdef __APPLE__
 #include "platform/macosx/vt_common.h"
@@ -268,7 +269,7 @@ static int is_encoder_supported(int encoder_id)
         case HB_VCODEC_VT_H265_10BIT:
         case HB_VCODEC_FFMPEG_MF_H264:
         case HB_VCODEC_FFMPEG_MF_H265:
-        // case HB_VCODEC_FFMPEG_MF_AV1:
+        case HB_VCODEC_FFMPEG_MF_AV1:
             return 1;
         default:
             return 0;
@@ -291,7 +292,7 @@ static int are_filters_supported(hb_list_t *filters, int hw_decode)
     }
     if (hw_decode & HB_DECODE_SUPPORT_MF)
     {
-        ret = 1;
+        ret = hb_mf_are_filters_supported(filters);
     }
 
     return ret;

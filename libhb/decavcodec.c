@@ -52,7 +52,6 @@
 #include "handbrake/lang.h"
 #include "handbrake/audio_resample.h"
 #include "handbrake/extradata.h"
-
 #if HB_PROJECT_FEATURE_QSV
 #include "libavutil/hwcontext_qsv.h"
 #include "handbrake/qsv_common.h"
@@ -383,7 +382,6 @@ static int decavcodecaInit( hb_work_object_t * w, hb_job_t * job )
 
     codec       = avcodec_find_decoder(w->codec_param);
     pv->context = avcodec_alloc_context3(codec);
-    // pv->context->hw_device_ctx
 
     if (pv->title->opaque_priv != NULL)
     {
@@ -1737,6 +1735,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     if ( global_verbosity_level <= 1 )
     {
         oldlevel = av_log_get_level();
+        // av_log_set_level( AV_LOG_QUIET );
         av_log_set_level( AV_LOG_VERBOSE );
     }
 
@@ -1794,29 +1793,8 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     {
         ret = avcodec_receive_frame(pv->context, recv_frame);
 
-        if (ret >= 0) {
-            hb_log("HANDBRAKE: Decoded frame with PTS = %" PRId64, recv_frame->pts);
-            // hb_log("recv_frame props: format=%d, width=%d, height=%d, hw_frames_ctx=%p, pts=%" PRId64,
-                // recv_frame->format, recv_frame->width, recv_frame->height, recv_frame->hw_frames_ctx, recv_frame->pts);
-
-        // Check for hardware decoding
-        // if (recv_frame->hw_frames_ctx) {
-        //     AVHWFramesContext *hw_frames_ctx = (AVHWFramesContext *)recv_frame->hw_frames_ctx->data;
-
-        //     // Log that this frame was decoded using hardware
-        //     // hb_log("Frame decoded using hardware acceleration. Buffer Pool Size: %d\n",
-        //         hw_frames_ctx->initial_pool_size);
-        // } else {
-        //     // Log that this frame was decoded using software
-        //     // hb_log("Frame decoded using software fallback.\n");
-        // }
-            // Increment the frame counter
-            // decoded_frame_count++;
-
-            // // Add a delay if 40 frames have been decoded
-            // if (decoded_frame_count >=63) {
-                hb_log("63 frames decoded");// Reset the counter
-            // }
+        if (ret >= 0) { 
+            // hb_log("decavcodec: AFTER DECODE receive_frame!! recv_frame->format=%s", av_get_pix_fmt_name(recv_frame->format));
         }
 
         if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF) {
@@ -1857,7 +1835,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
                 }
             }
         }
-
+        // hb_log("AFTER FRAME COPY AFTER DECODE!! frame->format=%s\n", av_get_pix_fmt_name(pv->frame->format));
         // Recompute frame duration
         compute_frame_duration(pv);
         filter_video(pv);

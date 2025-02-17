@@ -1109,6 +1109,7 @@ static void Encode( hb_work_object_t *w, hb_buffer_t **buf_in,
 
     // Encode
     // hb_log("HANDBRAKE: SENDING FRAME TO ENCODE!, PTS=%" PRId64 "\n", frame.pts);
+    // hb_log("HANDBRAKE: BEFORE ENCODE AVFrame format=%s\n",av_get_pix_fmt_name(frame.format)); 
     ret = avcodec_send_frame(pv->context, &frame);
     av_frame_unref(&frame);
 
