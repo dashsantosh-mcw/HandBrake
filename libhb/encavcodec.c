@@ -159,7 +159,7 @@ static const enum AVPixelFormat standard_10bit_pix_fmts[] =
 
 static const enum AVPixelFormat h26x_mf_pix_fmts[] =
 {
-    AV_PIX_FMT_NV12, AV_PIX_FMT_NONE
+    AV_PIX_FMT_D3D11, AV_PIX_FMT_NV12, AV_PIX_FMT_NONE
 };
 
 static const enum AVPixelFormat nvenc_pix_formats_10bit[] =
@@ -1110,6 +1110,8 @@ static void Encode( hb_work_object_t *w, hb_buffer_t **buf_in,
     }
 
     // Encode
+    // hb_log("HANDBRAKE: SENDING FRAME TO ENCODE!, PTS=%" PRId64 "\n", frame.pts);
+    // hb_log("HANDBRAKE: BEFORE ENCODE AVFrame format=%s\n",av_get_pix_fmt_name(frame.format)); 
     ret = avcodec_send_frame(pv->context, &frame);
     av_frame_unref(&frame);
 
@@ -1154,6 +1156,7 @@ static void Flush( hb_work_object_t * w, hb_buffer_list_t * list )
 int encavcodecWork( hb_work_object_t * w, hb_buffer_t ** buf_in,
                     hb_buffer_t ** buf_out )
 {
+    // hb_log("encavcodec.c: Inside encavcodecWork function!!\n");
     hb_work_private_t * pv = w->private_data;
     hb_buffer_t       * in = *buf_in;
     hb_buffer_list_t    list;
