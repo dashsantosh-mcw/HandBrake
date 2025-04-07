@@ -1748,7 +1748,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
     if ( global_verbosity_level <= 1 )
     {
         oldlevel = av_log_get_level();
-        av_log_set_level( AV_LOG_QUIET );
+        av_log_set_level( AV_LOG_VERBOSE );
     }
 
     if (packet_info != NULL)
@@ -1846,7 +1846,7 @@ static int decodeFrame( hb_work_private_t * pv, packet_info_t * packet_info )
 
     if ( global_verbosity_level <= 1 )
     {
-        av_log_set_level( oldlevel );
+        // av_log_set_level( oldlevel );
     }
 
     return got_picture;
