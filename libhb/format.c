@@ -9,6 +9,7 @@
 
 #include "handbrake/common.h"
 #include "handbrake/avfilter_priv.h"
+#include "handbrake/hwaccel.h"
 #if HB_PROJECT_FEATURE_QSV && (defined( _WIN32 ) || defined( __MINGW32__ ))
 #include "handbrake/qsv_common.h"
 #endif
@@ -70,6 +71,13 @@ static int format_init(hb_filter_object_t *filter, hb_filter_init_t *init)
             hb_dict_set_string(avsettings, "out_range", (init->job->qsv.ctx->out_range == AVCOL_RANGE_JPEG) ? "full" : "limited");
 
         hb_dict_set(avfilter, "vpp_qsv", avsettings);
+    }
+    else
+#elif HB_PROJECT_FEATURE_MF
+    if (hb_hwaccel_is_full_hardware_pipeline_enabled(init->job))
+    {
+        hb_dict_set_string(avsettings, "output_fmt", format);
+        hb_dict_set(avfilter, "scale_d3d11", avsettings);
     }
     else
 #endif
