@@ -205,3 +205,55 @@ int hb_mf_av1_available()
     return is_mf_av1_available;
 }
 
+int hb_mf_are_filters_supported(hb_list_t *filters)
+{
+    if (filters == NULL || hb_list_count(filters) == 0)
+    {
+        hb_log("D3D11: No filters to process");
+        return 1; // If no filters are provided, assume support
+    }
+
+    for (int i = 0; i < hb_list_count(filters); i++)
+    {
+        hb_filter_object_t *filter = hb_list_item(filters, i);
+        if (filter == NULL)
+        {
+            hb_log("D3D11: Null filter object encountered");
+            return 0;
+        }
+
+        switch (filter->id)
+        {
+            case HB_FILTER_CROP_SCALE:
+                hb_log("D3D11: Scaling filter supported");
+                break;
+            case HB_FILTER_FORMAT:
+                hb_log("D3D11: Format supported");
+                break;
+
+            case HB_FILTER_AVFILTER:
+                hb_log("D3D11: AVFilter filter supported");
+                break;
+
+            case HB_FILTER_VFR:
+                {
+                    int mode = hb_dict_get_int(filter->settings, "mode");
+                    hb_log("Checking VFR mode: %d", mode);
+                    if (mode == 2)
+                    {
+                        hb_log("D3D11: Unsupported VFR mode %d detected", mode);
+                        return 0;
+                    }
+                    hb_log("D3D11: VFR mode %d supported", mode);
+                    continue;
+                }
+
+            default:
+                hb_log("D3D11: Unsupported filter %s (id: %d)", filter->name, filter->id);
+                return 0; // Unsupported filter
+        }
+    }
+
+    hb_log("D3D11: All filters are supported");
+    return 1; // All filters are supported
+}

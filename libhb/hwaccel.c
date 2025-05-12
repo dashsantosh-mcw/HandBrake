@@ -11,6 +11,8 @@
 #include "handbrake/handbrake.h"
 #include "handbrake/nvenc_common.h"
 #include "handbrake/qsv_common.h"
+#include "libavutil/hwcontext_d3d11va.h"
+#include "handbrake/mf_common.h"
 #ifdef __APPLE__
 #include "platform/macosx/vt_common.h"
 #endif
@@ -27,6 +29,9 @@ static int is_encoder_supported(int encoder_id)
         case HB_VCODEC_VT_H264:
         case HB_VCODEC_VT_H265:
         case HB_VCODEC_VT_H265_10BIT:
+        case HB_VCODEC_FFMPEG_MF_H264:
+        case HB_VCODEC_FFMPEG_MF_H265:
+        case HB_VCODEC_FFMPEG_MF_AV1:
         case HB_VCODEC_FFMPEG_QSV_H264:
         case HB_VCODEC_FFMPEG_QSV_H265:
         case HB_VCODEC_FFMPEG_QSV_H265_10BIT:
@@ -50,6 +55,10 @@ static int are_filters_supported(hb_job_t * job)
     if (job->hw_decode & HB_DECODE_SUPPORT_NVDEC)
     {
         ret = hb_nvenc_are_filters_supported(job->list_filter);
+    }
+    if (job->hw_decode & HB_DECODE_SUPPORT_MF)
+    {
+        ret = hb_mf_are_filters_supported(job->list_filter);
     }
 #if HB_PROJECT_FEATURE_QSV
     if (job->hw_decode & HB_DECODE_SUPPORT_QSV)
@@ -331,6 +340,12 @@ AVBufferRef *hb_hwaccel_init_hw_frames_ctx(AVBufferRef *hw_device_ctx,
     frames_ctx->width = width;
     frames_ctx->height = height;
 
+    AVD3D11VAFramesContext *frames_hwctx = frames_ctx->hwctx;
+    frames_hwctx->BindFlags |= D3D11_BIND_DECODER;
+    if (sw_fmt == AV_PIX_FMT_NV12)
+    {
+        frames_hwctx->BindFlags |= D3D11_BIND_VIDEO_ENCODER;
+    }
     if (initial_pool_size > 0)
     {
         frames_ctx->initial_pool_size = initial_pool_size;
