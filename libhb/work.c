@@ -7,6 +7,8 @@
    For full terms see the file COPYING file or visit http://www.gnu.org/licenses/gpl-2.0.html
  */
 
+#include<sys/time.h>
+
 #include <time.h>
 #include "handbrake/handbrake.h"
 #include "libavformat/avformat.h"
@@ -15,6 +17,12 @@
 #include "handbrake/dovi_common.h"
 #include "handbrake/rpu.h"
 #include "handbrake/hwaccel.h"
+
+const int work_ids[] = {9, 17, 25, 1, 24};
+const int num_work_ids = sizeof(work_ids) / sizeof(int);
+    
+const int filter_ids[] = {11, 20, 33}; 
+const int num_filter_ids = sizeof(filter_ids) / sizeof(int);
 
 #if HB_PROJECT_FEATURE_QSV
 #include "handbrake/qsv_common.h"
@@ -2324,6 +2332,11 @@ void hb_work_loop( void * _w )
     hb_work_object_t * w = _w;
     hb_buffer_t      * buf_in = NULL, * buf_out = NULL;
 
+    hb_log("Name - %s, Id - %d",w->name, w->id);
+    double elapsed_time = 0.0;
+    int framesCount = 0;
+    int track_index = -1;
+
     while ((w->die == NULL || !*w->die) && !*w->done &&
            w->status != HB_WORK_DONE)
     {
@@ -2345,7 +2358,31 @@ void hb_work_loop( void * _w )
         // Invalidate buf_out so that if there is no output
         // we don't try to pass along junk.
         buf_out = NULL;
-        w->status = w->work( w, &buf_in, &buf_out );
+        for (int i = 0; i < num_work_ids; i++) {
+            if (w->id == work_ids[i]) {
+                track_index = i;
+                break;
+            }
+        }
+        if(track_index == -1)
+        {
+            w->status = w->work( w, &buf_in, &buf_out );
+        }
+        else
+        {
+            struct timeval start;
+            gettimeofday(&start, NULL);
+            w->status = w->work( w, &buf_in, &buf_out );
+            struct timeval end;
+            gettimeofday(&end, NULL);
+            double current_time = 0.0;
+            long seconds = end.tv_sec - start.tv_sec;
+            long useconds = end.tv_usec - start.tv_usec;
+            current_time = seconds + useconds / 1e6;
+
+            elapsed_time += current_time;
+            framesCount++;
+        }
 
         copy_chapter( buf_out, buf_in );
 
@@ -2382,6 +2419,15 @@ void hb_work_loop( void * _w )
         hb_buffer_close( &buf_out );
     }
 
+    if(track_index != -1)
+    {
+        hb_log("Work ID %d (%s):\n"
+                   "  Total time: %.6f seconds\n"
+                   "  Frames processed: %d\n"
+                   "  Average time per frame: %.6f seconds",
+                   w->id, w->name, elapsed_time, framesCount, (float)(elapsed_time / framesCount));
+    }
+
     // Consume data in incoming fifo till job completes so that
     // residual data does not stall the pipeline. There can be
     // residual data during point-to-point encoding.
@@ -2407,6 +2453,10 @@ static void filter_loop( void * _f )
 {
     hb_filter_object_t * f = _f;
     hb_buffer_t      * buf_in, * buf_out = NULL;
+    hb_log("Name - %s, Id - %d",f->name, f->id);
+    double elapsed_time = 0.0;
+    int framesCount = 0;
+    int track_index = -1;
 
     while( !*f->done && f->status != HB_FILTER_DONE )
     {
@@ -2434,8 +2484,30 @@ static void filter_loop( void * _f )
 
         buf_out = NULL;
 
-        f->status = f->work( f, &buf_in, &buf_out );
-
+        for (int i = 0; i < num_filter_ids; i++) {
+            if (f->id == filter_ids[i]) {
+                track_index = i;
+                break;
+            }
+        }
+        if(track_index  == -1)
+        {
+            f->status = f->work( f, &buf_in, &buf_out );
+        }
+        else
+        {
+            struct timeval start;
+            gettimeofday(&start, NULL);
+            f->status = f->work( f, &buf_in, &buf_out );
+            struct timeval end;
+            gettimeofday(&end, NULL);
+            long seconds = end.tv_sec - start.tv_sec;
+            long useconds = end.tv_usec - start.tv_usec;
+            double current_time = seconds + useconds / 1e6;
+            
+            elapsed_time += current_time;
+            framesCount++;
+        }
         if ( buf_out && f->chapter_val && f->chapter_time <= buf_out->s.start )
         {
             buf_out->s.new_chap = f->chapter_val;
@@ -2452,13 +2524,38 @@ static void filter_loop( void * _f )
         }
         if( buf_out )
         {
-            while ( !*f->done )
+            if(track_index  != -1)
             {
-                if ( hb_fifo_full_wait( f->fifo_out ) )
+                struct timeval start;
+                gettimeofday(&start, NULL);
+                while ( !*f->done )
                 {
-                    hb_fifo_push( f->fifo_out, buf_out );
-                    buf_out = NULL;
-                    break;
+                    if ( hb_fifo_full_wait( f->fifo_out ) )
+                    {
+                        hb_fifo_push( f->fifo_out, buf_out );
+                        buf_out = NULL;
+                        break;
+                    }
+                }
+                struct timeval end;
+                gettimeofday(&end, NULL);
+                long seconds = end.tv_sec - start.tv_sec;
+                long useconds = end.tv_usec - start.tv_usec;
+                double current_time = seconds + useconds / 1e6;
+                
+                elapsed_time += current_time;
+                framesCount++;
+            }
+            else
+            {
+                while ( !*f->done )
+                {
+                    if ( hb_fifo_full_wait( f->fifo_out ) )
+                    {
+                        hb_fifo_push( f->fifo_out, buf_out );
+                        buf_out = NULL;
+                        break;
+                    }
                 }
             }
         }
@@ -2466,6 +2563,15 @@ static void filter_loop( void * _f )
     if ( buf_out )
     {
         hb_buffer_close( &buf_out );
+    }
+
+    if(track_index  != -1)
+    {
+        hb_log("Filter ID %d (%s):\n"
+                   "  Total time: %.6f seconds\n"
+                   "  Frames processed: %d\n"
+                   "  Average time per frame: %.6f seconds",
+                   f->id, f->name, elapsed_time, framesCount, (float)(elapsed_time / framesCount));
     }
 
     // Consume data in incoming fifo till job complete so that
