@@ -90,7 +90,7 @@ hb_avfilter_graph_init(hb_value_t * settings, hb_filter_init_t * init)
                                                     init->hw_pix_fmt,
                                                     par->width,
                                                     par->height,
-                                                            32);
+                                                            0);
             if (!par->hw_frames_ctx)
             {   
                 goto fail;

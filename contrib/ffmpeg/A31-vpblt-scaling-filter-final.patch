@@ -772,7 +772,7 @@ index 0000000000..b0ad274bea
 +    frames_ctx->sw_format = sw_format;
 +    frames_ctx->width = s->width;
 +    frames_ctx->height = s->height;
-+    frames_ctx->initial_pool_size = 30; // Adjust pool size as needed
++    frames_ctx->initial_pool_size = 10; // Adjust pool size as needed
 +
 +    AVD3D11VAFramesContext *frames_hwctx = frames_ctx->hwctx;
 +    frames_hwctx->MiscFlags = 0;
