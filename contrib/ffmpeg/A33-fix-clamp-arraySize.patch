@@ -1,0 +1,41 @@
+From 1e5f6136b81b151a4ddd13a803b58f6a02ff050c Mon Sep 17 00:00:00 2001
+From: Dash Santosh <dash.sathyanarayanan@multicorewareinc.com>
+Date: Fri, 4 Jul 2025 05:35:39 -0700
+Subject: [PATCH] fix: clamp arraySize
+
+---
+ libavcodec/pthread_frame.c    | 4 ++++
+ libavutil/hwcontext_d3d11va.c | 2 +-
+ 2 files changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/libavcodec/pthread_frame.c b/libavcodec/pthread_frame.c
+index 4ea5dd3698..de733a49c6 100644
+--- a/libavcodec/pthread_frame.c
++++ b/libavcodec/pthread_frame.c
+@@ -393,6 +393,10 @@ FF_ENABLE_DEPRECATION_WARNINGS
+ 
+         if (!!dst->hw_frames_ctx != !!src->hw_frames_ctx ||
+             (dst->hw_frames_ctx && dst->hw_frames_ctx->data != src->hw_frames_ctx->data)) {
++            //av_log(dst, AV_LOG_VERBOSE,
++            //"thread context update conditions: \ndst->hw_frames_ctx: %p, src->hw_frames_ctx: %p\ndst->hw_frames_ctx->data: %p, src->hw_frames_ctx->data: %p\n",
++              //     dst->hw_frames_ctx, src->hw_frames_ctx,
++                //   dst->hw_frames_ctx && dst->hw_frames_ctx->data, src->hw_frames_ctx && src->hw_frames_ctx->data);
+             av_buffer_unref(&dst->hw_frames_ctx);
+ 
+             if (src->hw_frames_ctx) {
+diff --git a/libavutil/hwcontext_d3d11va.c b/libavutil/hwcontext_d3d11va.c
+index 7e122d607f..2a139027eb 100644
+--- a/libavutil/hwcontext_d3d11va.c
++++ b/libavutil/hwcontext_d3d11va.c
+@@ -294,7 +294,7 @@ static int d3d11va_frames_init(AVHWFramesContext *ctx)
+         .MipLevels  = 1,
+         .Format     = s->format,
+         .SampleDesc = { .Count = 1 },
+-        .ArraySize  = ctx->initial_pool_size,
++        .ArraySize  = FFMIN(ctx->initial_pool_size, 64),
+         .Usage      = D3D11_USAGE_DEFAULT,
+         .BindFlags  = hwctx->BindFlags,
+         .MiscFlags  = hwctx->MiscFlags,
+-- 
+2.34.1
+

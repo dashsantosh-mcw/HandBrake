@@ -1,0 +1,35 @@
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index ef09568381..242d7a8869 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -469,7 +469,7 @@ static inline int decode_simple_internal(AVCodecContext *avctx, AVFrame *frame,
+     if (!ret)
+         av_assert0(frame->buf[0]);
+     if (ret == AVERROR(EAGAIN))
+-        ret = 0;
++        ret = 0;
+ 
+     /* do not stop draining when got_frame != 0 or ret < 0 */
+     if (avci->draining && !got_frame) {
+@@ -1706,7 +1706,7 @@ end:
+ 
+ fail:
+     if (ret < 0) {
+-        av_log(avctx, AV_LOG_ERROR, "get_buffer() failed\n");
++        av_log(avctx, AV_LOG_ERROR, "get_buffer() failed ret=%d\n", ret);
+         av_frame_unref(frame);
+     }
+ 
+diff --git a/libavcodec/pthread_frame.c b/libavcodec/pthread_frame.c
+index de733a49c6..162f779247 100644
+--- a/libavcodec/pthread_frame.c
++++ b/libavcodec/pthread_frame.c
+@@ -1053,7 +1053,7 @@ int ff_thread_get_buffer(AVCodecContext *avctx, AVFrame *f, int flags)
+ {
+     int ret = thread_get_buffer_internal(avctx, f, flags);
+     if (ret < 0)
+-        av_log(avctx, AV_LOG_ERROR, "thread_get_buffer() failed\n");
++        av_log(avctx, AV_LOG_ERROR, "thread_get_buffer() failed, ret=%d\n", ret);
+     return ret;
+ }
+ 

@@ -1,0 +1,20 @@
+diff --git a/libavutil/hwcontext_d3d11va.c b/libavutil/hwcontext_d3d11va.c
+index 2a139027eb..74b1e4bcd9 100644
+--- a/libavutil/hwcontext_d3d11va.c
++++ b/libavutil/hwcontext_d3d11va.c
+@@ -288,13 +288,14 @@ static int d3d11va_frames_init(AVHWFramesContext *ctx)
+         return AVERROR(EINVAL);
+     }
+ 
++    ctx->initial_pool_size = FFMIN(ctx->initial_pool_size, 64);
+     texDesc = (D3D11_TEXTURE2D_DESC){
+         .Width      = ctx->width,
+         .Height     = ctx->height,
+         .MipLevels  = 1,
+         .Format     = s->format,
+         .SampleDesc = { .Count = 1 },
+-        .ArraySize  = FFMIN(ctx->initial_pool_size, 64),
++        .ArraySize  = ctx->initial_pool_size,
+         .Usage      = D3D11_USAGE_DEFAULT,
+         .BindFlags  = hwctx->BindFlags,
+         .MiscFlags  = hwctx->MiscFlags,
